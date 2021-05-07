@@ -1,10 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Formatters.Binary;
+using System.Threading;
+using System.Windows;
 using System.Xml;
 using System.Xml.Serialization;
 using NLog;
@@ -34,6 +37,8 @@ namespace dnGREP.Common
             public const string IncludeArchive = "IncludeArchive";
             [DefaultValue(true)]
             public const string IncludeSubfolder = "IncludeSubfolder";
+            [DefaultValue(-1)]
+            public const string MaxSubfolderDepth = "MaxSubfolderDepth";
             [DefaultValue(SearchType.Regex)]
             public const string TypeOfSearch = "TypeOfSearch";
             [DefaultValue(FileSearchType.Asterisk)]
@@ -43,14 +48,18 @@ namespace dnGREP.Common
             [DefaultValue("*.*")]
             public const string FilePattern = "FilePattern";
             public const string FilePatternIgnore = "FilePatternIgnore";
+            [DefaultValue(true)]
+            public const string UseGitignore = "UseGitignore";
             [DefaultValue(FileSizeFilter.No)]
             public const string UseFileSizeFilter = "UseFileSizeFilter";
             public const string CaseSensitive = "CaseSensitive";
+            [DefaultValue(true)]
             public const string PreviewFileContent = "PreviewFileContent";
             public const string Multiline = "Multiline";
             public const string Singleline = "Singleline";
             public const string StopAfterFirstMatch = "StopAfterFirstMatch";
             public const string WholeWord = "WholeWord";
+            public const string BooleanOperators = "BooleanOperators";
             public const string SizeFrom = "SizeFrom";
             [DefaultValue(100)]
             public const string SizeTo = "SizeTo";
@@ -71,8 +80,12 @@ namespace dnGREP.Common
             public const string ShowFilePathInResults = "ShowFilePathInResults";
             [DefaultValue(true)]
             public const string AllowSearchingForFileNamePattern = "AllowSearchingForFileNamePattern";
+            [DefaultValue(true)]
+            public const string DetectEncodingForFileNamePattern = "DetectEncodingForFileNamePattern";
             public const string CustomEditor = "CustomEditor";
             public const string CustomEditorArgs = "CustomEditorArgs";
+            public const string CompareApplication = "CompareApplication";
+            public const string CompareApplicationArgs = "CompareApplicationArgs";
             public const string ExpandResults = "ExpandResults";
             [DefaultValue(true)]
             public const string ShowVerboseMatchCount = "ShowVerboseMatchCount";
@@ -88,7 +101,6 @@ namespace dnGREP.Common
             public const string PreviewWindowFont = "PreviewWindowFont";
             [DefaultValue(false)]
             public const string PreviewWindowWrap = "PreviewWindowWrap";
-            public const string PreviewWindowSize = "PreviewWindowSize";
             [DefaultValue(20)]
             public const string MaxPathBookmarks = "MaxPathBookmarks";
             [DefaultValue(20)]
@@ -115,11 +127,54 @@ namespace dnGREP.Common
             public const string ReplaceWindowFontSize = "ReplaceWindowFontSize";
             [DefaultValue(false)]
             public const string ReplaceWindowWrap = "ReplaceWindowWrap";
+            [DefaultValue(true)]
+            public const string FollowWindowsTheme = "FollowWindowsTheme";
+            [DefaultValue("Light")]
+            public const string CurrentTheme = "CurrentTheme";
+            [DefaultValue(SortType.FileNameDepthFirst)]
+            public const string TypeOfSort = "TypeOfSort";
+            [DefaultValue(ListSortDirection.Ascending)]
+            public const string SortDirection = "SortDirection";
+            [DefaultValue(true)]
+            public const string ShowFileInfoTooltips = "ShowFileInfoTooltips";
+            [DefaultValue(true)]
+            public const string HighlightMatches = "HighlightMatches";
+            [DefaultValue(true)]
+            public const string ShowResultOptions = "ShowResultOptions";
+            [DefaultValue(1.0)]
+            public const string ResultsTreeScale = "ResultsTreeScale";
+            [DefaultValue(false)]
+            public const string HighlightCaptureGroups = "HighlightCaptureGroups";
+            [DefaultValue(true)]
+            public const string UseDefaultFont = "UseDefaultFont";
+            public const string ApplicationFontFamily = "ApplicationFontFamily";
+            public const string MainFormFontSize = "MainFormFontSize";
+            public const string ReplaceFormFontSize = "ReplaceFormFontSize";
+            public const string DialogFontSize = "DialogFontSize";
+            [DefaultValue("-layout -enc UTF-8 -bom")]
+            public const string PdfToTextOptions = "PdfToTextOptions";
+            [DefaultValue(false)]
+            public const string FollowSymlinks = "FollowSymlinks";
+            public const string MainWindowState = "MainWindowState";
+            public const string MainWindowBounds = "MainWindowBounds";
+            public const string ReplaceBounds = "ReplaceBounds";
+            public const string PreviewBounds = "PreviewBounds";
+            public const string PreviewWindowState = "PreviewWindowState";
+            public const string PreviewDocked = "PreviewDocked";
+            public const string PreviewDockSide = "PreviewDockSide";
+            public const string PreviewDockedWidth = "PreviewDockedWidth";
+            public const string PreviewDockedHeight = "PreviewDockedHeight";
+            public const string PreviewHidden = "PreviewHidden";
+            [DefaultValue(true)]
+            public const string PreviewAutoPosition = "PreviewAutoPosition";
+            [DefaultValue(false)]
+            public const string CaptureGroupSearch = "CaptureGroupSearch";
         }
 
         private static GrepSettings instance;
-        private static Logger logger = LogManager.GetCurrentClassLogger();
+        private static readonly Logger logger = LogManager.GetCurrentClassLogger();
         private const string storageFileName = "dnGREP.Settings.dat";
+        private const string mutexId = "{83D660FA-E399-4BBC-A3FC-09897115D2E2}";
 
         private GrepSettings() { }
 
@@ -152,23 +207,48 @@ namespace dnGREP.Common
         {
             try
             {
-                if (!File.Exists(path))
-                    return;
-
-                using (FileStream stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                if (File.Exists(path))
                 {
-                    if (stream == null)
-                        return;
-                    XmlSerializer serializer = new XmlSerializer(typeof(SerializableDictionary));
-                    this.Clear();
-                    SerializableDictionary appData = (SerializableDictionary)serializer.Deserialize(stream);
-                    foreach (KeyValuePair<string, string> pair in appData)
-                        this[pair.Key] = pair.Value;
+                    using (FileStream stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    {
+                        if (stream == null)
+                            return;
+                        XmlSerializer serializer = new XmlSerializer(typeof(SerializableDictionary));
+                        this.Clear();
+                        SerializableDictionary appData = (SerializableDictionary)serializer.Deserialize(stream);
+                        foreach (KeyValuePair<string, string> pair in appData)
+                            this[pair.Key] = pair.Value;
+                    }
                 }
+                InitializeFonts();
             }
             catch (Exception ex)
             {
-                logger.Log<Exception>(LogLevel.Error, "Failed to load settings", ex);
+                logger.Error(ex, "Failed to load settings: " + ex.Message);
+            }
+        }
+
+        private void InitializeFonts()
+        {
+            if (!TryGetValue(Key.ApplicationFontFamily, out string value) ||
+                string.IsNullOrWhiteSpace(value))
+            {
+                Set(Key.ApplicationFontFamily, SystemFonts.MessageFontFamily.Source);
+            }
+
+            if (Get<double>(Key.MainFormFontSize) == 0)
+            {
+                Set(Key.MainFormFontSize, SystemFonts.MessageFontSize);
+            }
+
+            if (Get<double>(Key.ReplaceFormFontSize) == 0)
+            {
+                Set(Key.ReplaceFormFontSize, SystemFonts.MessageFontSize);
+            }
+
+            if (Get<double>(Key.DialogFontSize) == 0)
+            {
+                Set(Key.DialogFontSize, SystemFonts.MessageFontSize);
             }
         }
 
@@ -177,7 +257,7 @@ namespace dnGREP.Common
         /// </summary>
         public void Save()
         {
-            Save(Utils.GetDataFolderPath() + "\\" + storageFileName);
+            Save(Path.Combine(Utils.GetDataFolderPath(), storageFileName));
         }
 
         /// <summary>
@@ -186,13 +266,35 @@ namespace dnGREP.Common
         /// <param name="path">Path to settings file</param>
         public void Save(string path)
         {
-            try
-            {
-                if (!Directory.Exists(Path.GetDirectoryName(path)))
-                    Directory.CreateDirectory(Path.GetDirectoryName(path));
+            // don't save in warmUp mode
+            if (Environment.GetCommandLineArgs().Contains("/warmUp", StringComparison.OrdinalIgnoreCase))
+                return;
 
-                lock (this)
+            using (var mutex = new Mutex(false, mutexId))
+            {
+                bool hasHandle = false;
+                try
                 {
+                    try
+                    {
+                        hasHandle = mutex.WaitOne(5000, false);
+                        if (hasHandle == false)
+                        {
+                            logger.Info("Timeout waiting for exclusive access to save app settings.");
+                            return;
+                        }
+                    }
+                    catch (AbandonedMutexException)
+                    {
+                        // The mutex was abandoned in another process,
+                        // it will still get acquired
+                        hasHandle = true;
+                    }
+
+                    // Perform work here.
+                    if (!Directory.Exists(Path.GetDirectoryName(path)))
+                        Directory.CreateDirectory(Path.GetDirectoryName(path));
+
                     // Create temp file in case save crashes
                     using (FileStream stream = File.OpenWrite(path + "~"))
                     using (XmlWriter xmlStream = XmlWriter.Create(stream, new XmlWriterSettings { Indent = true }))
@@ -205,10 +307,15 @@ namespace dnGREP.Common
                     File.Copy(path + "~", path, true);
                     Utils.DeleteFile(path + "~");
                 }
-            }
-            catch (Exception ex)
-            {
-                logger.Log<Exception>(LogLevel.Error, "Failed to load settings", ex);
+                catch (Exception ex)
+                {
+                    logger.Error(ex, "Failed to save app settings: " + ex.Message);
+                }
+                finally
+                {
+                    if (hasHandle)
+                        mutex.ReleaseMutex();
+                }
             }
         }
 
@@ -229,7 +336,7 @@ namespace dnGREP.Common
             string value = this[key];
 
             if (value == null)
-                return getDefaultValue<T>(key);
+                return GetDefaultValue<T>(key);
 
             try
             {
@@ -240,6 +347,10 @@ namespace dnGREP.Common
                 else if (typeof(T).IsEnum)
                 {
                     return (T)Enum.Parse(typeof(T), value);
+                }
+                else if (typeof(T) == typeof(Rect))
+                {
+                    return (T)Convert.ChangeType(Rect.Parse(value), typeof(Rect));
                 }
                 else if (!typeof(T).IsPrimitive)
                 {
@@ -256,7 +367,7 @@ namespace dnGREP.Common
             }
             catch
             {
-                return getDefaultValue<T>(key);
+                return GetDefaultValue<T>(key);
             }
         }
 
@@ -313,6 +424,12 @@ namespace dnGREP.Common
             {
                 this[key] = value.ToString();
             }
+            else if (typeof(T) == typeof(Rect))
+            {
+                Rect rect = (Rect)Convert.ChangeType(value, typeof(Rect));
+                // need invariant culture for Rect.Parse to work
+                this[key] = rect.ToString(CultureInfo.InvariantCulture);
+            }
             else if (!typeof(T).IsPrimitive)
             {
                 using (MemoryStream stream = new MemoryStream())
@@ -330,7 +447,7 @@ namespace dnGREP.Common
         }
 
         private List<FieldInfo> constantKeys;
-        private T getDefaultValue<T>(string key)
+        private T GetDefaultValue<T>(string key)
         {
             if (constantKeys == null)
             {
@@ -348,8 +465,7 @@ namespace dnGREP.Common
             if (info == null)
                 return default(T);
 
-            DefaultValueAttribute[] attr = info.GetCustomAttributes(typeof(DefaultValueAttribute), false) as DefaultValueAttribute[];
-            if (attr != null && attr.Length == 1)
+            if (info.GetCustomAttributes(typeof(DefaultValueAttribute), false) is DefaultValueAttribute[] attr && attr.Length == 1)
                 return (T)attr[0].Value;
 
             return default(T);

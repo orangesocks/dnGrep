@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Alphaleonis.Win32.Filesystem;
@@ -56,7 +57,17 @@ namespace dnGREP.Common
                     count++;
                     ProcessedFile(this, new ProgressStatus(true, searchResults.Count, count, null, file));
 
-                    searchResults.Add(new GrepSearchResult(file, searchPattern, null, Encoding.Default));
+                    Encoding encoding = Encoding.Default;
+                    if (codePage > -1)
+                        encoding = Encoding.GetEncoding(codePage);
+
+                    if (GrepSettings.Instance.Get<bool>(GrepSettings.Key.DetectEncodingForFileNamePattern))
+                    {
+                        if (codePage == -1 && !Utils.IsArchive(file) && !Utils.IsBinary(file) && !Utils.IsPdfFile(file))
+                            encoding = Utils.GetFileEncoding(file);
+                    }
+
+                    searchResults.Add(new GrepSearchResult(file, searchPattern, null, encoding));
 
                     if (searchOptions.HasFlag(GrepSearchOption.StopAfterFirstMatch))
                         break;
@@ -122,6 +133,59 @@ namespace dnGREP.Common
             }
         }
 
+        public List<GrepSearchResult> CaptureGroupSearch(IEnumerable<string> files, string filePatternInclude,
+            GrepSearchOption searchOptions, SearchType searchType, string searchPattern, int codePage)
+        {
+            searchResults.Clear();
+
+            if (files == null || !files.Any())
+                return searchResults;
+
+            Utils.CancelSearch = false;
+
+            try
+            {
+                foreach (string filePath in files)
+                {
+                    string fileName = Path.GetFileName(filePath);
+                    string modSearchPattern = Regex.Replace(fileName, filePatternInclude, searchPattern,
+                        RegexOptions.IgnoreCase, TimeSpan.FromSeconds(4.0));
+
+                    if (string.IsNullOrEmpty(modSearchPattern))
+                    {
+                        continue;
+                    }
+                    else if (searchType == SearchType.Regex && !Utils.ValidateRegex(modSearchPattern))
+                    {
+                        logger.Error($"Capture group search pattern is not a valid regular expression: '{modSearchPattern}'");
+                        continue;
+                    }
+
+                    Search(filePath, searchType, modSearchPattern, searchOptions, codePage);
+
+                    if (searchOptions.HasFlag(GrepSearchOption.StopAfterFirstMatch) && searchResults.Count > 0)
+                        break;
+
+                    if (Utils.CancelSearch)
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex, "Failed in capture group search");
+            }
+            finally
+            {
+                if (cancellationTokenSource != null)
+                {
+                    cancellationTokenSource.Dispose();
+                    cancellationTokenSource = null;
+                }
+                GrepEngineFactory.UnloadEngines();
+            }
+            return new List<GrepSearchResult>(searchResults);
+        }
+
         private void AddSearchResult(GrepSearchResult result)
         {
             lock (lockObj)
@@ -151,10 +215,12 @@ namespace dnGREP.Common
 
                 Interlocked.Increment(ref processedFilesCount);
 
+                bool isArchive = file.Contains(ArchiveDirectory.ArchiveSeparator);
+
                 Encoding encoding = Encoding.Default;
                 if (codePage > -1)
                     encoding = Encoding.GetEncoding(codePage);
-                else if (!Utils.IsBinary(file) && !Utils.IsPdfFile(file))
+                else if (!isArchive && !Utils.IsBinary(file) && !Utils.IsPdfFile(file))
                     encoding = Utils.GetFileEncoding(file);
 
                 if (Utils.CancelSearch)
@@ -164,7 +230,15 @@ namespace dnGREP.Common
                     return;
                 }
 
-                List<GrepSearchResult> fileSearchResults = engine.Search(file, searchPattern, searchType, searchOptions, encoding);
+                List<GrepSearchResult> fileSearchResults = null;
+                if (isArchive)
+                {
+                    fileSearchResults = ArchiveEngine.Search(engine, file, searchPattern, searchType, searchOptions, encoding);
+                }
+                else
+                {
+                    fileSearchResults = engine.Search(file, searchPattern, searchType, searchOptions, encoding);
+                }
 
                 if (fileSearchResults != null && fileSearchResults.Count > 0)
                 {
@@ -179,7 +253,7 @@ namespace dnGREP.Common
             }
             catch (Exception ex)
             {
-                logger.Log<Exception>(LogLevel.Error, ex.Message, ex);
+                logger.Error(ex, "Failed in Search");
                 AddSearchResult(new GrepSearchResult(file, searchPattern, ex.Message, false));
                 if (ProcessedFile != null)
                 {
@@ -239,6 +313,14 @@ namespace dnGREP.Common
                         else if (!Utils.IsBinary(tempFileName))
                             encoding = Utils.GetFileEncoding(tempFileName);
 
+                        // The UTF-8 encoding returned from Encoding.GetEncoding("utf-8") includes the BOM - see Encoding.GetPreamble()
+                        // If this file does not have the BOM, then change to an encoder without the BOM so the BOM is not added in 
+                        // the replace operation
+                        if (encoding is UTF8Encoding && !Utils.HasUtf8ByteOrderMark(tempFileName))
+                        {
+                            encoding = new UTF8Encoding(false);
+                        }
+
                         if (Utils.CancelSearch)
                         {
                             break;
@@ -267,7 +349,7 @@ namespace dnGREP.Common
                     }
                     catch (Exception ex)
                     {
-                        logger.Log<Exception>(LogLevel.Error, ex.Message, ex);
+                        logger.Error(ex, "Failure in Replace");
                         try
                         {
                             // Replace the file
@@ -303,7 +385,7 @@ namespace dnGREP.Common
             }
             try
             {
-                foreach(var item in undoMap)
+                foreach (var item in undoMap)
                 {
                     string sourceFile = Path.Combine(tempFolder, item.BackupName);
                     if (File.Exists(sourceFile))
@@ -313,7 +395,7 @@ namespace dnGREP.Common
             }
             catch (Exception ex)
             {
-                logger.Log<Exception>(LogLevel.Error, "Failed to undo replacement", ex);
+                logger.Error(ex, "Failed to undo replacement");
                 return false;
             }
         }

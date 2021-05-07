@@ -4,30 +4,57 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Shapes;
 using dnGREP.Common;
-using dnGREP.Common.UI;
+using dnGREP.WPF.Properties;
+using DockFloat;
 using ICSharpCode.AvalonEdit;
 using ICSharpCode.AvalonEdit.Editing;
+using ICSharpCode.AvalonEdit.Search;
 
 namespace dnGREP.WPF
 {
     /// <summary>
     /// Interaction logic for ReplaceWindow.xaml
     /// </summary>
-    public partial class ReplaceWindow : Window
+    public partial class ReplaceWindow : ThemedWindow
     {
         private ReplaceViewHighlighter highlighter;
         private ReplaceViewLineNumberMargin lineNumberMargin;
         private bool isInitializing;
         private bool isInPropertyChanged;
         private bool isInCaretMoved;
+        private readonly SearchPanel searchPanel;
 
         public ReplaceWindow()
         {
             InitializeComponent();
 
-            Loaded += ReplaceWindow_Loaded;
+            if (LayoutProperties.ReplaceBounds == Rect.Empty ||
+                LayoutProperties.ReplaceBounds == new Rect(0, 0, 0, 0))
+            {
+                Width = 800;
+                Height = 980;
+                WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            }
+            else
+            {
+                WindowStartupLocation = WindowStartupLocation.Manual;
+                Left = LayoutProperties.ReplaceBounds.Left;
+                Top = LayoutProperties.ReplaceBounds.Top;
+                Width = LayoutProperties.ReplaceBounds.Width;
+                Height = LayoutProperties.ReplaceBounds.Height;
+            }
+
+            Loaded += (s, e) =>
+            {
+                if (!this.IsOnScreen())
+                    this.CenterWindow();
+
+                this.ConstrainToScreen();
+            };
+
             cbWrapText.IsChecked = GrepSettings.Instance.Get<bool?>(GrepSettings.Key.ReplaceWindowWrap);
             zoomSlider.Value = GrepSettings.Instance.Get<int>(GrepSettings.Key.ReplaceWindowFontSize);
 
@@ -42,6 +69,9 @@ namespace dnGREP.WPF
             lineNumberMargin.SetBinding(Control.ForegroundProperty, lineNumbersForeground);
 
             DataContext = ViewModel;
+
+            searchPanel = SearchPanel.Install(textEditor);
+            searchPanel.MarkerBrush = Application.Current.Resources["Match.Highlight.Background"] as Brush;
 
             ViewModel.LoadFile += (s, e) => LoadFile();
             ViewModel.ReplaceMatch += (s, e) => textEditor.TextArea.TextView.Redraw();
@@ -59,28 +89,17 @@ namespace dnGREP.WPF
             textEditor.TextArea.Caret.PositionChanged += Caret_PositionChanged;
         }
 
-        void ReplaceWindow_Loaded(object sender, RoutedEventArgs e)
-        {
-            Left = Properties.Settings.Default.ReplaceBounds.Left;
-            Top = Properties.Settings.Default.ReplaceBounds.Top;
-            Width = Properties.Settings.Default.ReplaceBounds.Width;
-            Height = Properties.Settings.Default.ReplaceBounds.Height;
-
-            if (!UiUtils.IsOnScreen(this))
-                UiUtils.CenterWindow(this);
-        }
-
         private void SaveSettings()
         {
             GrepSettings.Instance.Set(GrepSettings.Key.ReplaceWindowWrap, cbWrapText.IsChecked);
             GrepSettings.Instance.Set(GrepSettings.Key.ReplaceWindowFontSize, (int)zoomSlider.Value);
 
-            Properties.Settings.Default.ReplaceBounds = new System.Drawing.Rectangle(
-               (int)Left,
-               (int)Top,
-               (int)ActualWidth,
-               (int)ActualHeight);
-            Properties.Settings.Default.Save();
+            LayoutProperties.ReplaceBounds = new Rect(
+               Left,
+               Top,
+               ActualWidth,
+               ActualHeight);
+            LayoutProperties.Save();
         }
 
         public ReplaceViewModel ViewModel { get; } = new ReplaceViewModel();
@@ -106,6 +125,7 @@ namespace dnGREP.WPF
             else if (e.PropertyName == "CurrentSyntax")
             {
                 textEditor.SyntaxHighlighting = ViewModel.HighlightingDefinition;
+                textEditor.TextArea.TextView.LinkTextForegroundBrush = Application.Current.Resources["AvalonEdit.Link"] as Brush;
                 textEditor.TextArea.TextView.Redraw();
             }
         }
@@ -128,6 +148,7 @@ namespace dnGREP.WPF
                 textEditor.TextArea.TextView.LineTransformers.Add(highlighter);
                 textEditor.Encoding = ViewModel.Encoding;
                 textEditor.SyntaxHighlighting = ViewModel.HighlightingDefinition;
+                textEditor.TextArea.TextView.LinkTextForegroundBrush = Application.Current.Resources["AvalonEdit.Link"] as Brush;
             }
 
             lineNumberMargin.LineNumbers.AddRange(ViewModel.LineNumbers);
@@ -146,6 +167,12 @@ namespace dnGREP.WPF
             catch (Exception ex)
             {
                 textEditor.Text = "Error opening the file: " + ex.Message;
+                // remove the highlighter
+                for (int i = textEditor.TextArea.TextView.LineTransformers.Count - 1; i >= 0; i--)
+                {
+                    if (textEditor.TextArea.TextView.LineTransformers[i] is ReplaceViewHighlighter)
+                        textEditor.TextArea.TextView.LineTransformers.RemoveAt(i);
+                }
             }
 
             // recalculate the width of the line number margin

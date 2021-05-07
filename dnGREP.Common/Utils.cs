@@ -1,34 +1,42 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Security;
+using System.Security.Cryptography;
 using System.Security.Permissions;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows;
 using dnGREP.Everything;
 using NLog;
+using UtfUnknown;
 using Directory = Alphaleonis.Win32.Filesystem.Directory;
-using DirectoryInfo = Alphaleonis.Win32.Filesystem.DirectoryInfo;
 using File = Alphaleonis.Win32.Filesystem.File;
 using FileInfo = Alphaleonis.Win32.Filesystem.FileInfo;
 using Path = Alphaleonis.Win32.Filesystem.Path;
+using TextFieldParser = Microsoft.VisualBasic.FileIO.TextFieldParser;
 
 namespace dnGREP.Common
 {
     public static class Utils
     {
-        private static Logger logger = LogManager.GetCurrentClassLogger();
+        private static readonly Logger logger = LogManager.GetCurrentClassLogger();
+
+        private static readonly char[] chars =
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890".ToCharArray();
+
+        private static readonly string tempFolderName;
 
         private static readonly object regexLock = new object();
-        private static Dictionary<string, Regex> regexCache = new Dictionary<string, Regex>();
+        private static readonly Dictionary<string, Regex> regexCache = new Dictionary<string, Regex>();
 
         static Utils()
         {
-            ArchiveExtensions = new List<string>();
+            tempFolderName = "dnGrep-" + GetUniqueKey(12);
         }
 
         /// <summary>
@@ -111,7 +119,7 @@ namespace dnGREP.Common
                         {
                             var answer = MessageBox.Show(
                                 $"The file '{destinationFileInfo.Name}' already exists in {destinationFileInfo.DirectoryName}, overwrite existing?",
-                                "Overwrite File", MessageBoxButton.YesNoCancel, MessageBoxImage.Question, MessageBoxResult.No);
+                                "dnGrep - Overwrite File", MessageBoxButton.YesNoCancel, MessageBoxImage.Question, MessageBoxResult.No);
 
                             if (answer == MessageBoxResult.Cancel)
                                 return count;
@@ -178,7 +186,7 @@ namespace dnGREP.Common
                         {
                             var answer = MessageBox.Show(
                                 $"The file '{destinationFileInfo.Name}' already exists in {destinationFileInfo.DirectoryName}, overwrite existing?",
-                                "Overwrite File", MessageBoxButton.YesNoCancel, MessageBoxImage.Question, MessageBoxResult.No);
+                                "dnGrep - Overwrite File", MessageBoxButton.YesNoCancel, MessageBoxImage.Question, MessageBoxResult.No);
 
                             if (answer == MessageBoxResult.Cancel)
                                 return count;
@@ -254,10 +262,17 @@ namespace dnGREP.Common
             File.WriteAllText(destinationPath, GetResultLines(source), Encoding.UTF8);
         }
 
-        public static void SaveResultsReport(List<GrepSearchResult> source, string options, string destinationPath)
+        public static void SaveResultsReport(List<GrepSearchResult> source, bool booleanOperators, string searchText,
+            string options, string destinationPath)
         {
             if (File.Exists(destinationPath))
                 File.Delete(destinationPath);
+
+            List<string> orClauses = null;
+            if (booleanOperators)
+            {
+                ParseBooleanOperators(searchText, out List<string> andClauses, out orClauses);
+            }
 
             int fileCount = source.Where(r => !string.IsNullOrWhiteSpace(r.FileNameReal)).Select(r => r.FileNameReal).Distinct().Count();
             int lineCount = source.Sum(s => s.Matches.Where(r => r.LineNumber > 0).Select(r => r.LineNumber).Distinct().Count());
@@ -269,7 +284,7 @@ namespace dnGREP.Common
             sb.AppendFormat("Found {0} matches on {1} lines in {2} files",
                 matchCount.ToString("#,##0"), lineCount.ToString("#,##0"), fileCount.ToString("#,##0"))
                 .AppendLine().AppendLine();
-            sb.Append(GetResultLinesWithContext(source));
+            sb.Append(GetResultLinesWithContext(source, orClauses));
 
             File.WriteAllText(destinationPath, sb.ToString(), Encoding.UTF8);
         }
@@ -318,11 +333,29 @@ namespace dnGREP.Common
             return sb.ToString();
         }
 
-        public static string GetResultLinesWithContext(List<GrepSearchResult> source)
+        public static string GetResultLinesWithContext(List<GrepSearchResult> source, List<string> orClauses)
         {
             StringBuilder sb = new StringBuilder();
             foreach (var result in source)
             {
+                string orResults = string.Empty;
+                if (orClauses != null && orClauses.Any())
+                {
+                    var set = result.Matches.Select(m => m.SearchPattern);
+                    var hits = orClauses.Intersect(set);
+                    var misses = orClauses.Except(set);
+                    if (hits.Any())
+                    {
+                        orResults += "Found matches for " + string.Join(", ", hits.Select(s => "\'" + s + "\'"));
+                    }
+                    if (misses.Any())
+                    {
+                        if (!string.IsNullOrEmpty(orResults))
+                            orResults += Environment.NewLine;
+                        orResults += "Found no matches for " + string.Join(", ", misses.Select(s => "\'" + s + "\'"));
+                    }
+                }
+
                 // this call to SearchResults can be expensive if the results are not yet cached
                 var searchResults = result.SearchResults;
                 if (searchResults != null)
@@ -333,6 +366,9 @@ namespace dnGREP.Common
 
                     sb.AppendLine(result.FileNameDisplayed)
                       .AppendFormat("has {0} matches on {1} lines:", matchCount, lineCount).AppendLine();
+
+                    if (!string.IsNullOrEmpty(orResults))
+                        sb.AppendLine(orResults);
 
                     if (searchResults.Any())
                     {
@@ -413,7 +449,7 @@ namespace dnGREP.Common
         /// <param name="path"></param>
         public static void DeleteFolder(string path)
         {
-            string[] files = GetFileList(path, "*.*", null, false, false, true, true, true, false, 0, 0, FileDateFilter.None, null, null);
+            string[] files = GetFileList(path, "*.*", null, false, false, true, true, true, false, false, 0, 0, FileDateFilter.None, null, null, false, -1);
             foreach (string file in files)
             {
                 File.SetAttributes(file, FileAttributes.Normal);
@@ -430,77 +466,50 @@ namespace dnGREP.Common
         /// <returns></returns>
         public static Encoding GetFileEncoding(string srcFile)
         {
-            // TODO: Unit tests. At least a regression test for Google Code issue 204. In order to properly unit test this method, we should decouple it from the file system by passing in an object that can be easily faked/mocked (a Stream object?).
             using (FileStream readStream = File.Open(srcFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             {
-                var detector = new Ude.CharsetDetector();
-                detector.Feed(readStream);
-                detector.DataEnd();
-                return DotNetEncodingFromUde(detector.Charset) ?? Encoding.Default; // If we detected an encoding, use it, otherwise use default.
+                var results = CharsetDetector.DetectFromStream(readStream);
+                // Get the best Detection
+                DetectionDetail resultDetected = results.Detected;
+                // Get the System.Text.Encoding of the found encoding (can be null if not available)
+                Encoding encoding = resultDetected?.Encoding ?? Encoding.Default;
+                return encoding;
             }
         }
 
         /// <summary>
-        /// Maps a Ude charset to a System.Text.Encoding.
+        /// Detects the byte order mark of a file and returns an appropriate encoding for the file.
         /// </summary>
-        /// <returns>
-        /// The System.Text.Encoding for the given Ude CharsetDetector.Charset, or null if not found in the map.
-        /// </returns>
-        private static Encoding DotNetEncodingFromUde(string udeCharset)
+        /// <param name="stream"></param>
+        /// <returns></returns>
+        public static Encoding GetFileEncoding(Stream stream)
         {
-            if (udeCharset == null)
-                return null;
+            var results = CharsetDetector.DetectFromStream(stream);
+            // Get the best Detection
+            DetectionDetail resultDetected = results.Detected;
+            // Get the System.Text.Encoding of the found encoding (can be null if not available)
+            Encoding encoding = resultDetected?.Encoding ?? Encoding.Default;
 
-            // Ude to .NET encoding name mapping. We should update this if ever both support new encodings.
-            // I got this list by comparing Ude.Core\Charsets.cs with the table shown in the System.Text.Encoding
-            // docs at http://msdn.microsoft.com/en-us/library/vstudio/system.text.encoding(v=vs.100).aspx
-            // Note that it's a many-to-one mapping, in some cases, like (UTF-16LE, UTF-16BE) => utf-16.
-            var udeToDotNet = new Dictionary<string, string>()
-                                   {{"Big-5", "big5"},
-                                    {"EUC-JP", "euc-jp"},
-                                    {"EUC-KR", "euc-kr"},
-                                    {"gb18030", "GB18030"},
-                                    {"HZ-GB-2312", "hz-gb-2312"},
-                                    {"IBM855", "IBM855"},
-                                    {"ISO-2022-JP", "iso-2022-jp"},
-                                    {"ISO-2022-KR", "iso-2022-kr"},
-                                    {"ISO-8859-2", "iso-8859-2"},
-                                    {"ISO-8859-5", "iso-8859-5"},
-                                    {"ISO-8859-7", "iso-8859-7"},
-                                    {"ISO-8859-8", "iso-8859-8"},
-                                    {"KOI8-R", "koi8-r"},
-                                    {"Shift-JIS", "shift_jis"},
-                                    {"ASCII", "us-ascii"},
-                                    {"UTF-16LE", "utf-16"},
-                                    {"UTF-16BE", "utf-16"},
-                                    {"UTF-32BE", "utf-32"},
-                                    {"UTF-32LE", "utf-32"},
-                                    {"UTF-8", "utf-8"},
-                                    {"windows-1251", "windows-1251"},
-                                    {"windows-1252", "Windows-1252"},
-                                    {"windows-1253", "windows-1253"},
-                                    {"windows-1255", "windows-1255"},
-                                    {"x-mac-cyrillic", "x-mac-cyrillic"}};
-
-            if (udeToDotNet.ContainsKey(udeCharset))
-                return Encoding.GetEncoding(udeToDotNet[udeCharset]);
-            else
-                return null;
+            // reset the stream back to the beginning
+            stream.Seek(0, SeekOrigin.Begin);
+            return encoding;
         }
 
         /// <summary>
-        /// Returns true is file is binary. Algorithm taken from winGrep.
-        /// The function scans first 10KB for 0x0000 sequence
-        /// and if found, assumes the file to be binary
+        /// Returns true is file is binary.
         /// </summary>
         /// <param name="filePath">Path to a file</param>
         /// <returns>True is file is binary otherwise false</returns>
         public static bool IsBinary(string srcFile)
         {
-            using (FileStream readStream = File.Open(srcFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            if (File.Exists(srcFile))
             {
-                return IsBinary(readStream);
+                using (FileStream readStream = File.Open(srcFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    return IsBinary(readStream);
+                }
             }
+            return false;
         }
 
         public static bool IsBinary(Stream stream)
@@ -509,9 +518,10 @@ namespace dnGREP.Common
             {
                 byte[] buffer = new byte[1024];
                 int count = stream.Read(buffer, 0, buffer.Length);
-                for (int i = 0; i < count - 1; i = i + 2)
+                for (int i = 0; i < count - 3; i++)
                 {
-                    if (buffer[i] == 0 && buffer[i + 1] == 0)
+                    // check for 4 consecutive nulls - 2 will give false positive on UTF-32
+                    if (buffer[i] == 0 && buffer[i + 1] == 0 && buffer[i + 2] == 0 && buffer[i + 3] == 0)
                     {
                         return true;
                     }
@@ -584,6 +594,11 @@ namespace dnGREP.Common
             return false;
         }
 
+        public static bool IsFileInArchive(string srcFile)
+        {
+            return srcFile.Contains(ArchiveDirectory.ArchiveSeparator);
+        }
+
         /// <summary>
         /// Returns true if the parameter is a recognized archive file format file extension.
         /// </summary>
@@ -594,7 +609,7 @@ namespace dnGREP.Common
             if (!string.IsNullOrWhiteSpace(ext))
             {
                 // regex extensions may have a 'match end of line' char: remove it
-                ext = ext.TrimStart('.').TrimEnd('$').ToLower();
+                ext = ext.TrimStart('.').TrimEnd('$').ToLower(CultureInfo.CurrentUICulture);
                 return ArchiveExtensions.Contains(ext);
             }
             return false;
@@ -603,7 +618,12 @@ namespace dnGREP.Common
         /// <summary>
         /// Gets or set the list of archive extensions (lowercase, without leading '.')
         /// </summary>
-        public static List<string> ArchiveExtensions { get; set; }
+        public static List<string> ArchiveExtensions => ArchiveDirectory.Extensions;
+
+        /// <summary>
+        /// returns a list of archiveExtensions used to search for files (with leading '*.')
+        /// </summary>
+        public static List<string> ArchivePatterns => ArchiveDirectory.Patterns;
 
         /// <summary>
         /// Add DirectorySeparatorChar to the end of the folder path if does not exist
@@ -629,10 +649,10 @@ namespace dnGREP.Common
                 if (string.IsNullOrWhiteSpace(path))
                     return false;
 
-                string[] paths = SplitPath(path);
+                string[] paths = SplitPath(path, false);
                 foreach (string subPath in paths)
                 {
-                    if (subPath.Trim() != "" && !File.Exists(subPath) && !Directory.Exists(subPath))
+                    if (!File.Exists(subPath) && !Directory.Exists(subPath))
                         return false;
                 }
                 return true;
@@ -644,35 +664,45 @@ namespace dnGREP.Common
         }
 
         /// <summary>
-        /// Removes whitespace from the individual paths
+        /// Assumes the path argument should be a valid path and adds leading/tailing quotes
+        /// if needed so SplitPath does split it incorrectly
         /// </summary>
         /// <param name="path"></param>
         /// <returns></returns>
-        public static string CleanPath(string path)
+        public static string QuoteIfNeeded(string path)
         {
-            string result = path;
-            try
-            {
-                if (!string.IsNullOrWhiteSpace(path))
-                {
-                    List<string> items = new List<string>();
-                    string[] paths = SplitPath(path);
-                    foreach (string subPath in paths)
-                    {
-                        string p = subPath.Trim();
-                        if (!string.IsNullOrWhiteSpace(p) && (File.Exists(p) || Directory.Exists(p)))
-                            items.Add(p);
-                    }
+            if (string.IsNullOrWhiteSpace(path))
+                return string.Empty;
 
-                    result = string.Join(";", items.ToArray());
-                }
-            }
-            catch (Exception ex)
-            {
-                logger.Log<Exception>(LogLevel.Error, ex.Message, ex);
-            }
+            var parts = SplitPath(path, true);
+            if (parts.Length > 1 || parts[0] != path)
+                return "\"" + path + "\"";
 
-            return result;
+            return path;
+        }
+
+        /// <summary>
+        /// Test if a string (single or multi path delimited string) has a valid, common base folder
+        /// </summary>
+        /// <param name="path"></param>
+        /// <returns></returns>
+        public static bool HasSingleBaseFolder(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return false;
+
+            string[] paths = SplitPath(path, false);
+            if (paths.Length == 0)
+                return false;
+
+            if (paths.Length == 1 && !string.IsNullOrWhiteSpace(GetBaseFolder(path)))
+                return true;
+
+            string commonPath = FindCommonPath(paths);
+            if (!string.IsNullOrWhiteSpace(commonPath) && Directory.Exists(commonPath))
+                return true;
+
+            return false;
         }
 
         /// <summary>
@@ -685,18 +715,85 @@ namespace dnGREP.Common
         {
             try
             {
-                string[] paths = SplitPath(path);
-                if (paths[0].Trim() != "" && File.Exists(paths[0]))
-                    return Path.GetDirectoryName(paths[0]);
-                else if (paths[0].Trim() != "" && Directory.Exists(paths[0]))
-                    return paths[0];
-                else
+                if (string.IsNullOrWhiteSpace(path))
                     return null;
+
+                string[] paths = SplitPath(path, false);
+                if (paths.Length > 0)
+                {
+                    if (paths.Length > 1)
+                    {
+                        string commonPath = FindCommonPath(paths);
+                        if (!string.IsNullOrWhiteSpace(commonPath) && Directory.Exists(commonPath))
+                            return commonPath;
+                    }
+
+                    if (paths[0].Trim() != "" && File.Exists(paths[0]))
+                        return Path.GetDirectoryName(paths[0]);
+                    else if (paths[0].Trim() != "" && Directory.Exists(paths[0]))
+                        return paths[0];
+                    else
+                        return null;
+                }
             }
             catch
             {
                 return null;
             }
+            return null;
+        }
+
+        /// <summary>
+        /// Finds the common path shared by all paths in the list
+        /// </summary>
+        /// <param name="paths">the paths to compare</param>
+        /// <returns>the common path or empty string if not found</returns>
+        public static string FindCommonPath(IList<string> paths)
+        {
+            if (paths == null || paths.Count == 0)
+                return string.Empty;
+
+            string commonPath = string.Empty;
+            List<string> separatedPath = paths
+                .First(str => str.Length == paths.Max(st2 => st2.Length))
+                .Split(new char[] { Path.DirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries)
+                .ToList();
+
+            foreach (string pathSegment in separatedPath)
+            {
+                if (commonPath.Length == 0 && paths.All(str => str.StartsWith(pathSegment, StringComparison.CurrentCultureIgnoreCase)))
+                {
+                    commonPath = pathSegment;
+                }
+                else if (paths.All(str => str.StartsWith(commonPath + Path.DirectorySeparator + pathSegment, StringComparison.CurrentCultureIgnoreCase)))
+                {
+                    commonPath += Path.DirectorySeparator + pathSegment;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            return commonPath;
+        }
+
+        /// <summary>
+        /// Splits a list of patterns separated by ; or ,
+        /// </summary>
+        /// <param name="pattern">Pattern to split</param>
+        /// <returns>Array of strings. If path is null, returns null. If path is empty, returns empty array.</returns>
+        public static string[] SplitPattern(string pattern)
+        {
+            if (string.IsNullOrWhiteSpace(pattern))
+                return Array.Empty<string>();
+
+            // remove quotes
+            pattern = pattern.Replace("\"", string.Empty);
+
+            string[] parts = pattern.Split(new char[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries);
+
+            return parts.Select(p => p.Trim()).ToArray();
         }
 
         /// <summary>
@@ -705,74 +802,151 @@ namespace dnGREP.Common
         /// </summary>
         /// <param name="path">Path to split</param>
         /// <returns>Array of strings. If path is null, returns null. If path is empty, returns empty array.</returns>
-        public static string[] SplitPath(string path)
+        public static string[] SplitPath(string path, bool preserveWildcards)
         {
-            if (path == null)
-                return new string[0];
-            else if (path.Trim() == "")
-                return new string[0];
-
-            // remove quotes
-            path = path.Replace("\"", string.Empty);
+            if (string.IsNullOrWhiteSpace(path))
+                return Array.Empty<string>();
 
             List<string> output = new List<string>();
-            string[] paths = path.Split(';', ',');
+
+            string[] paths = new string[] { path };
+
+            // if path contains separators, parse it
+            if (path.Contains(";") || path.Contains(",") || path.Contains("\""))
+            {
+                using (TextReader reader = new StringReader(path))
+                {
+                    // using TextFieldParser take quoted strings as-is
+                    using (TextFieldParser parser = new TextFieldParser(reader))
+                    {
+                        parser.HasFieldsEnclosedInQuotes = path.Contains('"');
+                        parser.TrimWhiteSpace = false;
+                        parser.SetDelimiters(",", ";");
+                        paths = parser.ReadFields();
+                    }
+                }
+            }
+
+            path = path.Replace("\"", string.Empty);
+
             int splitterIndex = -1;
             for (int i = 0; i < paths.Length; i++)
             {
-                splitterIndex += paths[i].Length + 1;
-                string splitter = (splitterIndex < path.Length ? path[splitterIndex].ToString() : "");
-                StringBuilder sb = new StringBuilder();
-                if (File.Exists(paths[i]) || Directory.Exists(paths[i]))
-                    output.Add(paths[i]);
+                string testPath = paths[i];
+                splitterIndex += testPath.Length + 1;
+                string splitter = splitterIndex < path.Length ? path[splitterIndex].ToString() : string.Empty;
+                string testPathTrimmed = testPath.Trim();
+                if (File.Exists(testPathTrimmed) || Directory.Exists(testPathTrimmed))
+                {
+                    output.Add(testPathTrimmed);
+                }
                 else
                 {
-                    int subSplitterIndex = 0;
                     bool found = false;
-                    sb.Append(paths[i] + splitter);
-                    for (int j = i + 1; j < paths.Length; j++)
+                    IList<string> subPaths = GetPathsByWildcard(testPathTrimmed);
+                    if (subPaths.Count > 0)
                     {
-                        subSplitterIndex += paths[j].Length + 1;
-                        sb.Append(paths[j]);
-                        if (File.Exists(sb.ToString()) || Directory.Exists(sb.ToString()))
-                        {
-                            output.Add(sb.ToString());
-                            splitterIndex += subSplitterIndex;
-                            i = j;
-                            found = true;
-                            break;
-                        }
-                        sb.Append(splitterIndex + subSplitterIndex < path.Length ? path[splitterIndex + subSplitterIndex].ToString() : "");
+                        if (preserveWildcards)
+                            output.Add(testPathTrimmed);
+                        else
+                            output.AddRange(subPaths);
+                        found = true;
                     }
-                    if (!found && !string.IsNullOrWhiteSpace(paths[i]))
-                        output.Add(paths[i].TrimStart());
+
+                    if (!found)
+                    {
+                        // this handles folder names containing a comma or semicolon
+                        StringBuilder sb = new StringBuilder();
+                        int subSplitterIndex = 0;
+                        sb.Append(testPath + splitter);
+                        for (int j = i + 1; j < paths.Length; j++)
+                        {
+                            subSplitterIndex += paths[j].Length + 1;
+                            sb.Append(paths[j]);
+                            testPathTrimmed = sb.ToString().Trim();
+                            if (File.Exists(testPathTrimmed) || Directory.Exists(testPathTrimmed))
+                            {
+                                output.Add(testPathTrimmed);
+                                splitterIndex += subSplitterIndex;
+                                i = j;
+                                found = true;
+                                break;
+                            }
+                            else
+                            {
+                                subPaths = GetPathsByWildcard(testPathTrimmed);
+                                if (subPaths.Count > 0)
+                                {
+                                    if (preserveWildcards)
+                                        output.Add(testPathTrimmed);
+                                    else
+                                        output.AddRange(subPaths);
+
+                                    splitterIndex += subSplitterIndex;
+                                    i = j;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            sb.Append(splitterIndex + subSplitterIndex < path.Length ? path[splitterIndex + subSplitterIndex].ToString() : "");
+                        }
+                        if (!found && !string.IsNullOrWhiteSpace(testPath))
+                        {
+                            output.Add(testPath.Trim());
+                        }
+                    }
                 }
             }
             return output.ToArray();
+        }
+
+        /// <summary>
+        /// If the last path segment contains wild card chars, return the set of matching paths or files.
+        /// </summary>
+        /// <param name="path"></param>
+        /// <returns></returns>
+        private static IList<string> GetPathsByWildcard(string path)
+        {
+            List<string> output = new List<string>();
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                string parent = Path.GetDirectoryName(path);
+                if (Directory.Exists(parent))
+                {
+                    string pattern = Path.GetFileName(path);
+                    if (pattern.Contains(Path.WildcardQuestion) || pattern.Contains(Path.WildcardStarMatchAll))
+                    {
+                        string[] subDirs = Directory.GetDirectories(parent, pattern, SearchOption.TopDirectoryOnly);
+                        output.AddRange(subDirs);
+
+                        string[] files = Directory.GetFiles(parent, pattern, SearchOption.TopDirectoryOnly);
+                        output.AddRange(files);
+                    }
+                }
+            }
+            return output;
         }
 
         public static bool CancelSearch = false;
 
         public static bool PrepareSearchPatterns(FileFilter filter, List<string> includeSearchPatterns)
         {
+            if (filter == null)
+                throw new ArgumentNullException(nameof(filter));
+            if (includeSearchPatterns == null)
+                throw new ArgumentNullException(nameof(includeSearchPatterns));
+
             bool handled = false;
             if (!filter.IsRegex && !filter.NamePatternToInclude.Contains("#!"))
             {
-                var includePatterns = SplitPath(filter.NamePatternToInclude);
+                var includePatterns = SplitPattern(filter.NamePatternToInclude);
                 foreach (var pattern in includePatterns)
                 {
-                    includeSearchPatterns.Add(pattern);
+                    if (pattern == "*.doc" || pattern == "*.xls")
+                        includeSearchPatterns.Add(pattern + "*");
+                    else
+                        includeSearchPatterns.Add(pattern);
                 }
-                if (filter.IncludeArchive)
-                {
-                    foreach (var ext in ArchiveExtensions)
-                    {
-                        string fileExtension = "*." + ext;
-                        if (!includeSearchPatterns.Contains(fileExtension))
-                            includeSearchPatterns.Add(fileExtension);
-                    }
-                }
-
                 handled = true;
             }
             return handled;
@@ -788,14 +962,14 @@ namespace dnGREP.Common
             // non-regex include patterns are used as search patterns in the call to EnumerateFiles
             if (filter.IsRegex || !includePatternHandled)
             {
-                var includePatterns = SplitPath(filter.NamePatternToInclude);
+                var includePatterns = SplitPattern(filter.NamePatternToInclude);
                 foreach (var pattern in includePatterns)
                 {
                     includeRegexPatterns.Add(GetRegex(pattern, filter.IsRegex));
                 }
             }
 
-            var excludePatterns = SplitPath(filter.NamePatternToExclude);
+            var excludePatterns = SplitPattern(filter.NamePatternToExclude);
             foreach (var pattern in excludePatterns)
             {
                 excludeRegexPatterns.Add(GetRegex(pattern, filter.IsRegex));
@@ -814,7 +988,7 @@ namespace dnGREP.Common
 
                     if (!regexCache.TryGetValue(pattern, out regex))
                     {
-                        regex = new Regex(pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase);
+                        regex = new Regex(pattern, RegexOptions.IgnoreCase);
                         regexCache.Add(pattern, regex);
                     }
                 }
@@ -837,10 +1011,16 @@ namespace dnGREP.Common
         /// <returns></returns>
         public static IEnumerable<string> GetFileListEx(FileFilter filter)
         {
+            if (filter == null)
+            {
+                throw new ArgumentNullException(nameof(filter));
+            }
+
             if (string.IsNullOrWhiteSpace(filter.Path) || filter.NamePatternToInclude == null)
             {
                 yield break;
             }
+
 
             // Hash set to ensure file name uniqueness
             HashSet<string> matches = new HashSet<string>();
@@ -867,11 +1047,21 @@ namespace dnGREP.Common
                 yield break;
             }
 
-            foreach (var subPath in SplitPath(filter.Path))
+            foreach (var subPath in SplitPath(filter.Path, false))
             {
                 if (File.Exists(subPath))
                 {
-                    if (!matches.Contains(subPath))
+                    if (IsArchive(subPath))
+                    {
+                        if (filter.IncludeArchive)
+                        {
+                            foreach (var innerFile in EnumerateArchiveFiles(subPath, filter, hasSearchPattern,
+                            includeSearchPatterns, includeRegexPatterns, excludeRegexPatterns))
+                                yield return innerFile;
+                        }
+                    }
+                    else if (IncludeFile(subPath, filter, null, hasSearchPattern, includeSearchPatterns,
+                        includeRegexPatterns, excludeRegexPatterns) && !matches.Contains(subPath))
                     {
                         matches.Add(subPath);
                         yield return subPath;
@@ -883,9 +1073,28 @@ namespace dnGREP.Common
                     continue;
                 }
 
-                foreach (var filePath in SafeDirectory.EnumerateFiles(subPath, includeSearchPatterns, filter.IncludeHidden, filter.IncludeSubfolders))
+                Gitignore gitignore = null;
+                if (filter.UseGitIgnore)
                 {
-                    if (IncludeFile(filePath, filter, null, hasSearchPattern, includeSearchPatterns,
+                    var gitDirectories = SafeDirectory.GetGitignoreDirectories(subPath, filter.IncludeSubfolders, filter.FollowSymlinks);
+                    if (gitDirectories != null)
+                    {
+                        gitignore = GitUtil.GetGitignore(gitDirectories);
+                    }
+                }
+
+                foreach (var filePath in SafeDirectory.EnumerateFiles(subPath, includeSearchPatterns, gitignore, filter))
+                {
+                    if (IsArchive(filePath))
+                    {
+                        if (filter.IncludeArchive)
+                        {
+                            foreach (var innerFile in EnumerateArchiveFiles(filePath, filter, hasSearchPattern,
+                                includeSearchPatterns, includeRegexPatterns, excludeRegexPatterns))
+                                yield return innerFile;
+                        }
+                    }
+                    else if (IncludeFile(filePath, filter, null, hasSearchPattern, includeSearchPatterns,
                         includeRegexPatterns, excludeRegexPatterns) && !matches.Contains(filePath))
                     {
                         matches.Add(filePath);
@@ -898,20 +1107,43 @@ namespace dnGREP.Common
         private static IEnumerable<string> GetFileListEverything(FileFilter filter, IList<Regex> includeRegexPatterns, IList<Regex> excludeRegexPatterns)
         {
             string searchString = filter.Path.Trim();
+            List<string> includeSearchPatterns = new List<string> { "*.*" };// if including archives, return everything inside archives
             if (filter.IncludeArchive)
             {
                 // to search in archives, ask Everything to return all archive files
-                searchString += "|*." + string.Join("|*.", ArchiveExtensions.ToArray());
+                searchString += "|*." + string.Join("|*.", ArchiveExtensions);
             }
 
             foreach (var fileInfo in EverythingSearch.FindFiles(searchString, filter.IncludeHidden))
             {
                 FileData fileData = new FileData(fileInfo);
 
-                if (IncludeFile(fileInfo.FullName, filter, fileData, true, new List<string>(),
+                if (filter.IncludeArchive && IsArchive(fileInfo.FullName))
+                {
+                    foreach (var innerFile in EnumerateArchiveFiles(fileInfo.FullName, filter, true,
+                        includeSearchPatterns, includeRegexPatterns, excludeRegexPatterns))
+                    {
+                        yield return innerFile;
+                    }
+                }
+                else if (IncludeFile(fileInfo.FullName, filter, fileData, true, new List<string>(),
                     includeRegexPatterns, excludeRegexPatterns))
                 {
                     yield return fileInfo.FullName;
+                }
+            }
+        }
+
+        private static IEnumerable<string> EnumerateArchiveFiles(string filePath, FileFilter filter,
+            bool hasSearchPattern, IList<string> includeSearchPatterns,
+            IList<Regex> includeRegexPatterns, IList<Regex> excludeRegexPatterns)
+        {
+            foreach (var fileData in ArchiveDirectory.EnumerateFiles(filePath, includeSearchPatterns, filter))
+            {
+                if (IncludeFile(fileData.FullName, filter, fileData, hasSearchPattern, includeSearchPatterns,
+                    includeRegexPatterns, excludeRegexPatterns))
+                {
+                    yield return fileData.FullName;
                 }
             }
         }
@@ -928,22 +1160,15 @@ namespace dnGREP.Common
             bool hasSearchPattern, IList<string> includeSearchPatterns,
             IList<Regex> includeRegexPatterns, IList<Regex> excludeRegexPatterns)
         {
-            bool excludeMatch = false;
             bool includeMatch = false;
             try
             {
-                if (!filter.IncludeArchive && IsArchive(filePath))
-                    return false;
+                // check filters that do not read the file first...
 
-                if (!filter.IncludeBinary && !IsArchive(filePath))
+                // exclude this file?
+                foreach (var pattern in excludeRegexPatterns)
                 {
-                    bool isExcelMatch = IsExcelFile(filePath) && includeSearchPatterns.Contains(".xls", StringComparison.OrdinalIgnoreCase);
-                    bool isWordMatch = IsWordFile(filePath) && includeSearchPatterns.Contains(".doc", StringComparison.OrdinalIgnoreCase);
-
-                    // When searching for Excel and Word files, skip the binary file check:
-                    // If someone is searching for Excel or Word, don't make them include binary to 
-                    // find their files.  No need to include PDF, it doesn't test positive as a binary file.
-                    if (!(isExcelMatch || isWordMatch) && IsBinary(filePath))
+                    if (pattern.IsMatch(filePath))
                     {
                         return false;
                     }
@@ -979,46 +1204,57 @@ namespace dnGREP.Common
                         return false;
                     }
                 }
-                if (filter.IncludeArchive && IsArchive(filePath))
+
+                if (!filter.IncludeBinary && !IsArchive(filePath) && !IsFileInArchive(filePath))
                 {
+                    bool isExcelMatch = IsExcelFile(filePath) && includeSearchPatterns.Contains(".xls", StringComparison.OrdinalIgnoreCase);
+                    bool isWordMatch = IsWordFile(filePath) && includeSearchPatterns.Contains(".doc", StringComparison.OrdinalIgnoreCase);
+
+                    // When searching for Excel and Word files, skip the binary file check:
+                    // If someone is searching for Excel or Word, don't make them include binary to 
+                    // find their files.  No need to include PDF, it doesn't test positive as a binary file.
+                    if (!(isExcelMatch || isWordMatch) && IsBinary(filePath))
+                    {
+                        return false;
+                    }
+                }
+
+                if (hasSearchPattern)
+                {
+                    // already filtered in call to EnumerateFile
                     includeMatch = true;
                 }
-                if (!includeMatch)
+                else if (includeRegexPatterns.Count > 0)
                 {
-                    if (includeRegexPatterns.Count > 0)
+                    foreach (var pattern in includeRegexPatterns)
                     {
-                        foreach (var pattern in includeRegexPatterns)
+                        if (pattern.IsMatch(filePath) || CheckShebang(filePath, pattern.ToString()))
                         {
-                            if (pattern.IsMatch(filePath) || CheckShebang(filePath, pattern.ToString()))
-                            {
-                                includeMatch = true;
-                                break;
-                            }
+                            includeMatch = true;
+                            break;
                         }
                     }
-                    else if (hasSearchPattern)
-                    {
-                        // already filtered in call to EnumerateFile
-                        includeMatch = true;
-                    }
                 }
-                foreach (var pattern in excludeRegexPatterns)
+
+                if (includeMatch)
                 {
-                    if (pattern.IsMatch(filePath) || CheckShebang(filePath, pattern.ToString()))
+                    foreach (var pattern in excludeRegexPatterns)
                     {
-                        excludeMatch = true;
-                        break;
+                        if (CheckShebang(filePath, pattern.ToString()))
+                        {
+                            return false;
+                        }
                     }
                 }
-                if (excludeMatch || !includeMatch)
-                    return false;
+
+                return includeMatch;
             }
             catch (Exception ex)
             {
-                logger.Log<Exception>(LogLevel.Error, ex.Message, ex);
+                logger.Error(ex, "Failure in applying file filters");
+                // returning true shows an error in the results tree
+                return true;
             }
-
-            return true;
         }
 
         public static bool CheckShebang(string file, string pattern)
@@ -1043,7 +1279,7 @@ namespace dnGREP.Common
                                 break;
                             }
                         }
-                        return Regex.IsMatch(firstLine.Substring(2).Trim(), pattern.Substring(2), RegexOptions.Compiled | RegexOptions.IgnoreCase);
+                        return Regex.IsMatch(firstLine.Substring(2).Trim(), pattern.Substring(2), RegexOptions.IgnoreCase);
                     }
                     else
                     {
@@ -1067,22 +1303,28 @@ namespace dnGREP.Common
         /// <param name="namePatternToInclude">File name pattern. (E.g. *.cs) or regex to include. If null returns empty array. If empty string returns all files.</param>
         /// <param name="namePatternToExclude">File name pattern. (E.g. *.cs) or regex to exclude. If null or empty is ignored.</param>
         /// <param name="isRegex">Whether to use regex as search pattern. Otherwise use asterisks</param>
-        /// <param name="includeSubfolders">Include sub folders</param>
+        /// <param name="useEverything">use Everything for file search</param>
+        /// <param name="includeSubfolders">Include sub-folders</param>
         /// <param name="includeHidden">Include hidden folders</param>
         /// <param name="includeBinary">Include binary files</param>
         /// <param name="includeArchive">Include search in archives</param>
+        /// <param name="followSymlinks">Include search in symbolic links</param>
         /// <param name="sizeFrom">Size in KB</param>
         /// <param name="sizeTo">Size in KB</param>
         /// <param name="dateFilter">Filter by file modified or created date time range</param>
         /// <param name="startTime">start of time range</param>
         /// <param name="endTime">end of time range</param>
+        /// <param name="useGitignore">use .gitignore as an exclusion filter</param>
+        /// <param name="maxSubfolderDepth">Max depth of sub-folders where 0 is root only and -1 is all</param>
         /// <returns>List of file or empty list if nothing is found</returns>
         public static string[] GetFileList(string path, string namePatternToInclude, string namePatternToExclude, bool isRegex,
-            bool useEverything, bool includeSubfolders, bool includeHidden, bool includeBinary, bool includeArchive, int sizeFrom, int sizeTo,
-            FileDateFilter dateFilter, DateTime? startTime, DateTime? endTime)
+            bool useEverything, bool includeSubfolders, bool includeHidden, bool includeBinary, bool includeArchive,
+            bool followSymlinks, int sizeFrom, int sizeTo, FileDateFilter dateFilter,
+            DateTime? startTime, DateTime? endTime, bool useGitignore, int maxSubfolderDepth)
         {
-            var filter = new FileFilter(path, namePatternToInclude, namePatternToExclude, isRegex, useEverything,
-                includeSubfolders, includeHidden, includeBinary, includeArchive, sizeFrom, sizeTo, dateFilter, startTime, endTime);
+            var filter = new FileFilter(path, namePatternToInclude, namePatternToExclude, isRegex, useGitignore, useEverything,
+                includeSubfolders, maxSubfolderDepth, includeHidden, includeBinary, includeArchive, followSymlinks, sizeFrom, sizeTo,
+                dateFilter, startTime, endTime);
             return GetFileListEx(filter).ToArray();
         }
 
@@ -1093,7 +1335,7 @@ namespace dnGREP.Common
         /// <returns>Regular expression of null is empty</returns>
         public static string WildcardToRegex(string wildcard)
         {
-            if (wildcard == null || wildcard == "") return wildcard;
+            if (string.IsNullOrWhiteSpace(wildcard)) return wildcard;
 
             StringBuilder sb = new StringBuilder();
 
@@ -1288,7 +1530,9 @@ namespace dnGREP.Common
                         CreateNoWindow = true,
                         Arguments = args.CustomEditorArgs.Replace("%file", Quote(filePath))
                             .Replace("%line", args.LineNumber.ToString())
-                            .Replace("%pattern", args.Pattern),
+                            .Replace("%pattern", args.Pattern)
+                            .Replace("%match", args.FirstMatch)
+                            .Replace("%column", args.ColumnNumber.ToString()),
                     };
                     proc.Start();
                 }
@@ -1302,7 +1546,7 @@ namespace dnGREP.Common
         /// <returns></returns>
         public static string GetTempFolder()
         {
-            string tempPath = Path.Combine(Path.GetTempPath(), "~dnGREP-Temp");
+            string tempPath = Path.Combine(Path.GetTempPath(), tempFolderName);
             if (!Directory.Exists(tempPath))
             {
                 Directory.CreateDirectory(tempPath);
@@ -1315,7 +1559,7 @@ namespace dnGREP.Common
         /// </summary>
         public static void DeleteTempFolder()
         {
-            string tempPath = Path.Combine(Path.GetTempPath(), "~dnGREP-Temp");
+            string tempPath = Path.Combine(Path.GetTempPath(), tempFolderName);
             try
             {
                 if (Directory.Exists(tempPath))
@@ -1323,8 +1567,27 @@ namespace dnGREP.Common
             }
             catch (Exception ex)
             {
-                logger.Log<Exception>(LogLevel.Error, "Failed to delete temp folder", ex);
+                logger.Error(ex, "Failed to delete temp folder");
             }
+        }
+
+        public static string GetUniqueKey(int size)
+        {
+            byte[] data = new byte[4 * size];
+            using (RNGCryptoServiceProvider crypto = new RNGCryptoServiceProvider())
+            {
+                crypto.GetBytes(data);
+            }
+            StringBuilder result = new StringBuilder(size);
+            for (int i = 0; i < size; i++)
+            {
+                var rnd = BitConverter.ToUInt32(data, i * 4);
+                var idx = rnd % chars.Length;
+
+                result.Append(chars[idx]);
+            }
+
+            return result.ToString();
         }
 
         /// <summary>
@@ -1338,6 +1601,44 @@ namespace dnGREP.Common
 
             using (Process.Start("explorer.exe", "/select,\"" + fileName + "\""))
             {
+            }
+        }
+
+        public static void CompareFiles(IList<GrepSearchResult> files)
+        {
+            var settings = GrepSettings.Instance;
+            string application = settings.Get<string>(GrepSettings.Key.CompareApplication);
+            string args = settings.Get<string>(GrepSettings.Key.CompareApplicationArgs);
+
+            if (!string.IsNullOrWhiteSpace(application))
+            {
+                List<string> paths = new List<string>();
+                foreach (var item in files)
+                {
+                    string filePath = item.FileNameReal;
+                    if (Utils.IsArchive(filePath))
+                        filePath = ArchiveDirectory.ExtractToTempFile(item);
+
+                    if (!paths.Contains(filePath))
+                        paths.Add(filePath);
+
+                    if (paths.Count == 3)
+                        break;
+                }
+
+                string appArgs = string.IsNullOrWhiteSpace(args) ? string.Empty : args + " ";
+                string fileArgs = string.Join(" ", paths.Select(p => Quote(p)));
+
+                using (var proc = new Process())
+                {
+                    proc.StartInfo = new ProcessStartInfo(application)
+                    {
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        Arguments = appArgs + fileArgs
+                    };
+                    proc.Start();
+                }
             }
         }
 
@@ -1358,9 +1659,20 @@ namespace dnGREP.Common
         public static string GetDataFolderPath()
         {
             string currentFolder = GetCurrentPath(typeof(Utils));
-            if (canUseCurrentFolder == null)
+            if (!canUseCurrentFolder.HasValue)
             {
-                canUseCurrentFolder = HasWriteAccessToFolder(currentFolder);
+                // if started in Admin mode, the user can write to these directories
+                // so filter them out first...
+                if (currentFolder.IsSubDirectoryOf(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)) ||
+                    currentFolder.IsSubDirectoryOf(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)) ||
+                    currentFolder.IsSubDirectoryOf(Environment.GetFolderPath(Environment.SpecialFolder.Windows)))
+                {
+                    canUseCurrentFolder = false;
+                }
+                else
+                {
+                    canUseCurrentFolder = HasWriteAccessToFolder(currentFolder);
+                }
             }
 
             if (canUseCurrentFolder == true)
@@ -1374,6 +1686,44 @@ namespace dnGREP.Common
                     Directory.CreateDirectory(dataFolder);
                 return dataFolder;
             }
+        }
+
+        public static bool IsPortableMode
+        {
+            get
+            {
+                if (!canUseCurrentFolder.HasValue)
+                {
+                    GetDataFolderPath();
+                }
+                return canUseCurrentFolder.Value;
+            }
+        }
+
+        public static bool IsSubDirectoryOf(this string candidate, string other)
+        {
+            var isChild = false;
+            try
+            {
+                var candidateInfo = new DirectoryInfo(candidate);
+                var otherInfo = new DirectoryInfo(other);
+
+                while (candidateInfo.Parent != null)
+                {
+                    if (candidateInfo.Parent.FullName == otherInfo.FullName)
+                    {
+                        isChild = true;
+                        break;
+                    }
+                    else candidateInfo = candidateInfo.Parent;
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.Error(ex, $"Unable to check directories {candidate} and {other}");
+            }
+
+            return isChild;
         }
 
         private static bool HasWriteAccessToFolder(string folderPath)
@@ -1454,17 +1804,43 @@ namespace dnGREP.Common
                     {
                         files.Add(result.FileNameReal);
                     }
+                    else if (IsFileLocked(result.FileNameReal))
+                    {
+                        files.Add(result.FileNameReal);
+                    }
                 }
             }
             return files;
         }
 
+        public static bool IsFileLocked(string filePath)
+        {
+            if (!string.IsNullOrEmpty(filePath) && File.Exists(filePath))
+            {
+                try
+                {
+                    var list = File.GetProcessForFileLock(filePath);
+
+                    return list != null && list.Count > 0;
+                }
+                catch (Exception ex)
+                {
+                    logger.Error(ex, "Failure in file lock check");
+                }
+            }
+
+            return false;
+        }
+
         public static bool IsReadOnly(GrepSearchResult result)
         {
-            if (File.Exists(result.FileNameReal) && (File.GetAttributes(result.FileNameReal) & FileAttributes.ReadOnly) == FileAttributes.ReadOnly || result.ReadOnly)
-                return true;
-            else
-                return false;
+            if (File.Exists(result.FileNameReal))
+            {
+                if (File.GetAttributes(result.FileNameReal).HasFlag(FileAttributes.ReadOnly) || result.ReadOnly)
+                    return true;
+            }
+
+            return false;
         }
 
         public static string[] GetLines(string text)
@@ -1501,7 +1877,7 @@ namespace dnGREP.Common
         /// Retrieves lines with context based on matches
         /// </summary>
         /// <param name="body">Text</param>
-        /// <param name="bodyMatchesClone">List of matches with positions relative to entire text body</param>
+        /// <param name="bodyMatches">List of matches with positions relative to entire text body</param>
         /// <param name="beforeLines">Context line (before)</param>
         /// <param name="afterLines">Context line (after</param>
         /// <returns></returns>
@@ -1569,6 +1945,17 @@ namespace dnGREP.Common
                             startLine = lineNumber;
                             startIndex = bodyMatchesClone[0].StartLocation - currentIndex;
                             tempLinesTotalLength = 0;
+
+                            // Recording the before match context lines
+                            while (beforeQueue.Count > 0)
+                            {
+                                // If only 1 line - it is the same as matched line
+                                if (beforeQueue.Count == 1)
+                                    beforeQueue.Dequeue();
+                                else
+                                    contextLines.Add(new GrepLine(startLine - beforeQueue.Count + 1 + (lineNumber - startLine),
+                                        beforeQueue.Dequeue(), true, null));
+                            }
                         }
 
                         // Add line to queue
@@ -1589,29 +1976,20 @@ namespace dnGREP.Common
                                 lineNumbers.Add(i);
                                 string tempLine = lineQueue.Dequeue();
                                 lineStrings[i] = tempLine;
-                                // Recording context lines (before)
-                                while (beforeQueue.Count > 0)
-                                {
-                                    // If only 1 line - it is the same as matched line
-                                    if (beforeQueue.Count == 1)
-                                        beforeQueue.Dequeue();
-                                    else
-                                        contextLines.Add(new GrepLine(i - beforeQueue.Count + 1 + (lineNumber - startLine),
-                                            beforeQueue.Dequeue(), true, null));
-                                }
+
                                 string fileMatchId = bodyMatchesClone[0].FileMatchId;
                                 // First and only line
                                 if (i == startLine && i == lineNumber)
-                                    matches.Add(new GrepMatch(fileMatchId, i, startIndex, bodyMatchesClone[0].Length));
+                                    matches.Add(new GrepMatch(fileMatchId, bodyMatchesClone[0].SearchPattern, i, startIndex, bodyMatchesClone[0].Length, bodyMatchesClone[0].Groups));
                                 // First but not last line
                                 else if (i == startLine)
-                                    matches.Add(new GrepMatch(fileMatchId, i, startIndex, tempLine.TrimEndOfLine().Length - startIndex));
+                                    matches.Add(new GrepMatch(fileMatchId, bodyMatchesClone[0].SearchPattern, i, startIndex, tempLine.TrimEndOfLine().Length - startIndex, bodyMatchesClone[0].Groups));
                                 // Middle line
                                 else if (i > startLine && i < lineNumber)
-                                    matches.Add(new GrepMatch(fileMatchId, i, 0, tempLine.TrimEndOfLine().Length));
+                                    matches.Add(new GrepMatch(fileMatchId, bodyMatchesClone[0].SearchPattern, i, 0, tempLine.TrimEndOfLine().Length, bodyMatchesClone[0].Groups));
                                 // Last line
                                 else
-                                    matches.Add(new GrepMatch(fileMatchId, i, 0, bodyMatchesClone[0].Length - tempLinesTotalLength + line.Length + startIndex));
+                                    matches.Add(new GrepMatch(fileMatchId, bodyMatchesClone[0].SearchPattern, i, 0, bodyMatchesClone[0].Length - tempLinesTotalLength + line.Length + startIndex, bodyMatchesClone[0].Groups));
 
                                 startRecordingAfterLines = true;
                             }
@@ -1699,16 +2077,6 @@ namespace dnGREP.Common
             {
                 yield return new NumberedString() { LineCount = 0, FirstLineNumber = 0, Text = "" };
             }
-        }
-
-        public static int[] GetIntArray(int startLine, int lineCount)
-        {
-            int[] result = new int[lineCount];
-            for (int i = 0; i < lineCount; i++)
-            {
-                result[i] = startLine + i;
-            }
-            return result;
         }
 
         /// <summary>
@@ -1815,17 +2183,19 @@ namespace dnGREP.Common
         public static string GetHash(string input)
         {
             // step 1, calculate MD5 hash from input
-            System.Security.Cryptography.MD5 md5 = System.Security.Cryptography.MD5.Create();
-            byte[] inputBytes = System.Text.Encoding.ASCII.GetBytes(input);
-            byte[] hash = md5.ComputeHash(inputBytes);
-
-            // step 2, convert byte array to hex string
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < hash.Length; i++)
+            using (var md5 = System.Security.Cryptography.MD5.Create())
             {
-                sb.Append(hash[i].ToString("X2"));
+                byte[] inputBytes = Encoding.ASCII.GetBytes(input);
+                byte[] hash = md5.ComputeHash(inputBytes);
+
+                // step 2, convert byte array to hex string
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < hash.Length; i++)
+                {
+                    sb.Append(hash[i].ToString("X2", CultureInfo.InvariantCulture));
+                }
+                return sb.ToString();
             }
-            return sb.ToString();
         }
 
         /// <summary>
@@ -1852,6 +2222,7 @@ namespace dnGREP.Common
                beginText.EndsWith(":") ||
                beginText.EndsWith(";") ||
                beginText.EndsWith("-") ||
+               beginText.EndsWith("=") ||
                beginText.EndsWith("\\") ||
                beginText.EndsWith("/") ||
                beginText.EndsWith("'") ||
@@ -1905,6 +2276,7 @@ namespace dnGREP.Common
                endText.StartsWith(":") ||
                endText.StartsWith(";") ||
                endText.StartsWith("-") ||
+               endText.StartsWith("=") ||
                endText.StartsWith(">") ||
                endText.StartsWith("]") ||
                endText.StartsWith("}") ||
@@ -1949,6 +2321,14 @@ namespace dnGREP.Common
             return durationStringBuilder.ToString();
         }
 
+        public static bool HasUtf8ByteOrderMark(string srcFile)
+        {
+            using (FileStream readStream = File.Open(srcFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                return HasUtf8ByteOrderMark(readStream);
+            }
+        }
+
         public static bool HasUtf8ByteOrderMark(Stream inputStream)
         {
             int b1 = inputStream.ReadByte();
@@ -1957,6 +2337,58 @@ namespace dnGREP.Common
             inputStream.Seek(0, SeekOrigin.Begin);
 
             return (0xEF == b1 && 0xBB == b2 && 0xBF == b3);
+        }
+
+        public static bool IsGitInstalled => GitUtil.IsGitInstalled;
+
+        private const string AND = " AND ";
+        private const string OR = " OR ";
+
+        public static void ParseBooleanOperators(string text, out List<string> andClauses, out List<string> orClauses)
+        {
+            andClauses = null;
+            orClauses = null;
+            if (text.Contains(AND, StringComparison.InvariantCultureIgnoreCase))
+            {
+                andClauses = new List<string>();
+                SplitClauses(text, AND, andClauses);
+            }
+            else if (text.Contains(OR, StringComparison.InvariantCultureIgnoreCase))
+            {
+                orClauses = new List<string>();
+                SplitClauses(text, OR, orClauses);
+            }
+        }
+
+        private static void SplitClauses(string text, string key, List<string> clauses)
+        {
+            int pos1 = 0;
+            while (pos1 > -1 && pos1 < text.Length)
+            {
+                int pos2 = text.IndexOf(key, pos1, StringComparison.InvariantCultureIgnoreCase);
+                if (pos2 > -1)
+                {
+                    clauses.Add(text.Substring(pos1, pos2 - pos1));
+                    pos1 = pos2 + key.Length;
+                }
+                else
+                {
+                    clauses.Add(text.Substring(pos1));
+                    pos1 = text.Length;
+                }
+            }
+        }
+        public static bool ValidateRegex(string pattern)
+        {
+            try
+            {
+                Regex regex = new Regex(pattern);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
     }
 

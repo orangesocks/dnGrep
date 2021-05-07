@@ -27,6 +27,11 @@ namespace dnGREP.Engines.OpenXml
     {
         private static Logger logger = LogManager.GetCurrentClassLogger();
 
+        public IList<string> DefaultFileExtensions
+        {
+            get { return new string[] { "docx", "docm", "xls", "xlsx", "xlsm" }; }
+        }
+
         private readonly Dictionary<string, Dictionary<string, Level>> numberFormats = new Dictionary<string, Dictionary<string, Level>>();
 
 
@@ -103,7 +108,7 @@ namespace dnGREP.Engines.OpenXml
             }
             catch (Exception ex)
             {
-                logger.Log<Exception>(LogLevel.Error, string.Format("Failed to search inside Excel file '{0}'", file), ex);
+                logger.Error(ex, string.Format("Failed to search inside Excel file '{0}'", file));
             }
         }
 
@@ -170,7 +175,7 @@ namespace dnGREP.Engines.OpenXml
             }
             catch (Exception ex)
             {
-                logger.Log<Exception>(LogLevel.Error, string.Format("Failed to search inside Word file '{0}'", file), ex);
+                logger.Error(ex, string.Format("Failed to search inside Word file '{0}'", file));
             }
         }
 

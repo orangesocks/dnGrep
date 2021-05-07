@@ -1,4 +1,6 @@
-﻿using System.Windows.Media;
+﻿using System;
+using System.Windows;
+using System.Windows.Media;
 using dnGREP.Common;
 using ICSharpCode.AvalonEdit.Document;
 using ICSharpCode.AvalonEdit.Rendering;
@@ -19,7 +21,7 @@ namespace dnGREP.WPF
         {
             int lineStartOffset = line.Offset;
             string text = CurrentContext.Document.GetText(line);
-            if (result.Matches == null || result.Matches.Count == 0)
+            if (result == null || result.Matches == null || result.Matches.Count == 0)
                 return;
 
             int lineNumber = line.LineNumber;
@@ -30,6 +32,9 @@ namespace dnGREP.WPF
 
             if (lineResult != null)
             {
+                Brush background = Application.Current.Resources["Match.Highlight.Background"] as Brush;
+                Brush foreground = Application.Current.Resources["Match.Highlight.Foreground"] as Brush;
+
                 for (int i = 0; i < lineResult.Matches.Count; i++)
                 {
                     try
@@ -38,15 +43,14 @@ namespace dnGREP.WPF
 
                         base.ChangeLinePart(
                             lineStartOffset + grepMatch.StartLocation, // startOffset
-                            lineStartOffset + grepMatch.StartLocation + grepMatch.Length, // endOffset
+                            // match may include the non-printing newline chars at the end of the line, don't overflow the length
+                            Math.Min(line.EndOffset, lineStartOffset + grepMatch.StartLocation + grepMatch.Length), // endOffset
                             (VisualLineElement element) =>
                             {
                                 // This lambda gets called once for every VisualLineElement
                                 // between the specified offsets.
-                                Brush br = element.TextRunProperties.BackgroundBrush;
-                                // Replace the typeface with a modified version of
-                                // the same typeface
-                                element.TextRunProperties.SetBackgroundBrush(new SolidColorBrush(Colors.Yellow));
+                                element.TextRunProperties.SetBackgroundBrush(background);
+                                element.TextRunProperties.SetForegroundBrush(foreground);
                             });
                     }
                     catch

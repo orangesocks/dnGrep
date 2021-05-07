@@ -1,53 +1,35 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Text;
-using System.Windows;
-using System.Xml;
 using Alphaleonis.Win32.Filesystem;
 using dnGREP.Common;
 using ICSharpCode.AvalonEdit.Highlighting;
-using ICSharpCode.AvalonEdit.Highlighting.Xshd;
+using NLog;
 
 namespace dnGREP.WPF
 {
     public class PreviewViewModel : ViewModelBase, INotifyPropertyChanged
     {
+        private static Logger logger = LogManager.GetCurrentClassLogger();
+
         public PreviewViewModel()
         {
-            HighlightDefinitions = new Dictionary<string, IHighlightingDefinition>();
-            Highlighters = new List<string>();
-            foreach (var hl in HighlightingManager.Instance.HighlightingDefinitions)
-            {
-                HighlightDefinitions[hl.Name] = hl;
-                Highlighters.Add(hl.Name);
-            }
-            Highlighters.Add("SQL");
-            HighlightDefinitions["SQL"] = LoadHighlightingDefinition("sqlmode.xshd");
+            Highlighters = ThemedHighlightingManager.Instance.HighlightingNames.ToList();
             Highlighters.Sort();
             Highlighters.Insert(0, "None");
             CurrentSyntax = "None";
 
-            this.PropertyChanged += PreviewViewModel_PropertyChanged;
+            HighlightsOn = GrepSettings.Instance.Get<bool>(GrepSettings.Key.HighlightMatches);
+
+            ApplicationFontFamily = GrepSettings.Instance.Get<string>(GrepSettings.Key.ApplicationFontFamily);
+            MainFormFontSize = GrepSettings.Instance.Get<double>(GrepSettings.Key.MainFormFontSize);
+
+            PropertyChanged += PreviewViewModel_PropertyChanged;
         }
 
-        #region Properties and Events
         public event EventHandler<ShowEventArgs> ShowPreview;
-
-        private bool isVisible;
-        public bool IsVisible
-        {
-            get { return isVisible; }
-            set
-            {
-                if (value == isVisible)
-                    return;
-
-                isVisible = value;
-
-                base.OnPropertyChanged(() => IsVisible);
-            }
-        }
 
         private bool isLargeOrBinary;
         public bool IsLargeOrBinary
@@ -143,6 +125,20 @@ namespace dnGREP.WPF
             }
         }
 
+        private bool highlightsOn = true;
+        public bool HighlightsOn
+        {
+            get { return highlightsOn; }
+            set
+            {
+                if (value == highlightsOn)
+                    return;
+
+                highlightsOn = value;
+                base.OnPropertyChanged(() => HighlightsOn);
+            }
+        }
+
         private bool highlightDisabled;
         public bool HighlightDisabled
         {
@@ -162,42 +158,72 @@ namespace dnGREP.WPF
         {
             get
             {
-                if (HighlightDefinitions.ContainsKey(CurrentSyntax))
-                    return HighlightDefinitions[CurrentSyntax];
-                else
-                    return HighlightingManager.Instance.GetDefinitionByExtension("txt");
+                return ThemedHighlightingManager.Instance.GetDefinition(CurrentSyntax);
             }
         }
-        #endregion
+
+        private string applicationFontFamily;
+        public string ApplicationFontFamily
+        {
+            get { return applicationFontFamily; }
+            set
+            {
+                if (applicationFontFamily == value)
+                    return;
+
+                applicationFontFamily = value;
+                base.OnPropertyChanged(() => ApplicationFontFamily);
+            }
+        }
+
+        private double mainFormfontSize;
+        public double MainFormFontSize
+        {
+            get { return mainFormfontSize; }
+            set
+            {
+                if (mainFormfontSize == value)
+                    return;
+
+                mainFormfontSize = value;
+                base.OnPropertyChanged(() => MainFormFontSize);
+            }
+        }
 
         void PreviewViewModel_PropertyChanged(object sender, PropertyChangedEventArgs e)
         {
             UpdateState(e.PropertyName);
         }
 
-        private Dictionary<string, IHighlightingDefinition> HighlightDefinitions { get; set; }
-
-        #region Public Methods
-        public virtual void UpdateState(string name)
+        private void UpdateState(string name)
         {
-            if (name == "FilePath")
+            if (name == nameof(FilePath))
             {
                 if (!string.IsNullOrEmpty(filePath) &&
                     File.Exists(FilePath))
                 {
                     // Set current definition
                     var fileInfo = new FileInfo(FilePath);
-                    var definition = HighlightingManager.Instance.GetDefinitionByExtension(fileInfo.Extension);
+                    var definition = ThemedHighlightingManager.Instance.GetDefinitionByExtension(fileInfo.Extension);
                     if (definition != null)
                         CurrentSyntax = definition.Name;
                     else
                         CurrentSyntax = "None";
 
-                    // Do not preview files over 4MB or binary
-                    IsLargeOrBinary = fileInfo.Length > 4096000 || Utils.IsBinary(FilePath);
+                    try
+                    {
+                        // Do not preview files over 4MB or binary
+                        IsLargeOrBinary = fileInfo.Length > 4096000 || Utils.IsBinary(FilePath);
+                    }
+                    catch (System.IO.IOException ex)
+                    {
+                        // Is the file locked and cannot be read by IsBinary?
+                        // message is shown in the preview window
+                        logger.Error(ex, "Failure in check for large or binary");
+                    }
 
                     // Disable highlighting for large number of matches
-                    HighlightDisabled = GrepResult.Matches.Count > 5000;
+                    HighlightDisabled = GrepResult?.Matches?.Count > 5000;
 
                     // Tell View to show window
                     ShowPreview?.Invoke(this, new ShowEventArgs { ClearContent = true });
@@ -209,31 +235,18 @@ namespace dnGREP.WPF
                 }
             }
 
-            if (name == "LineNumber")
+            if (name == nameof(LineNumber))
             {
                 // Tell View to show window but not clear content
                 ShowPreview?.Invoke(this, new ShowEventArgs { ClearContent = false });
             }
 
-            if (name == "CurrentSyntax")
+            if (name == nameof(CurrentSyntax))
             {
                 // Tell View to show window and clear content
                 ShowPreview?.Invoke(this, new ShowEventArgs { ClearContent = true });
             }
         }
-        #endregion
-
-        #region Private Methods
-        private IHighlightingDefinition LoadHighlightingDefinition(
-            string resourceName)
-        {
-            var type = typeof(PreviewView);
-            var fullName = type.Namespace + "." + resourceName;
-            using (var stream = type.Assembly.GetManifestResourceStream(fullName))
-            using (var reader = new XmlTextReader(stream))
-                return HighlightingLoader.Load(reader, HighlightingManager.Instance);
-        }
-        #endregion
     }
 
     public class ShowEventArgs : EventArgs

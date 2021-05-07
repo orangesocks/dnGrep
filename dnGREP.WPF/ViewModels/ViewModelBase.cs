@@ -77,12 +77,6 @@ namespace dnGREP.WPF
             }
         }
 
-        protected virtual bool IsProperty<T>(Expression<Func<T>> expression, string name)
-        {
-            string propertyName = GetPropertyName(expression);
-            return propertyName == name;
-        }
-
         /// <summary>
         /// Get the string name for the property
         /// </summary>
@@ -95,7 +89,7 @@ namespace dnGREP.WPF
             return memberExpression.Member.Name;
         }
 
-#if DEBUG
+#if DEBUG_FINALIZE
         /// <summary>
         /// Useful for ensuring that ViewModel objects are properly garbage collected.
         /// </summary>

@@ -37,13 +37,18 @@ namespace dnGREP.Engines.Pdf
             }
             catch (Exception ex)
             {
-                logger.Log<Exception>(LogLevel.Error, "Failed to find pdftotext.exe.", ex);
+                logger.Error(ex, "Failed to find pdftotext.exe.");
                 return false;
             }
         }
 
         #endregion
 
+
+        public IList<string> DefaultFileExtensions
+        {
+            get { return new string[] { "pdf" }; }
+        }
         public bool IsSearchOnly
         {
             get { return true; }
@@ -96,7 +101,7 @@ namespace dnGREP.Engines.Pdf
             }
             catch (Exception ex)
             {
-                logger.Log<Exception>(LogLevel.Error, $"Failed to search inside PDF file: {ex.Message}", ex);
+                logger.Error(ex, $"Failed to search inside PDF file: {ex.Message}");
                 return new List<GrepSearchResult>();
             }
         }
@@ -135,11 +140,13 @@ namespace dnGREP.Engines.Pdf
                 pdfFilePath = @"\\?\" + pdfFilePath;
             }
 
+            string options = GrepSettings.Instance.Get<string>(GrepSettings.Key.PdfToTextOptions);
+
             using (Process process = new Process())
             {
                 // use command prompt
                 process.StartInfo.FileName = pathToPdfToText;
-                process.StartInfo.Arguments = string.Format("-layout \"{0}\" \"{1}\"", pdfFilePath, tempFileName);
+                process.StartInfo.Arguments = string.Format("{0} \"{1}\" \"{2}\"", options, pdfFilePath, tempFileName);
                 process.StartInfo.UseShellExecute = false;
                 process.StartInfo.WorkingDirectory = Utils.GetCurrentPath(typeof(GrepEnginePdf));
                 process.StartInfo.CreateNoWindow = true;
@@ -173,7 +180,7 @@ namespace dnGREP.Engines.Pdf
             }
         }
 
-        public bool Replace(string sourceFile, string destinationFile, string searchPattern, string replacePattern, SearchType searchType, 
+        public bool Replace(string sourceFile, string destinationFile, string searchPattern, string replacePattern, SearchType searchType,
             GrepSearchOption searchOptions, Encoding encoding, IEnumerable<GrepMatch> replaceItems)
         {
             throw new Exception("The method or operation is not implemented.");

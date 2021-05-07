@@ -1,5 +1,7 @@
 ﻿using System;
+using System.Reflection;
 using System.Windows;
+using Alphaleonis.Win32.Filesystem;
 using dnGREP.Common;
 using NLog;
 
@@ -10,54 +12,69 @@ namespace dnGREP.WPF
     /// </summary>
     public partial class App : Application
     {
-        private static Logger logger = LogManager.GetCurrentClassLogger();
+        private static readonly Logger logger = LogManager.GetCurrentClassLogger();
+
+        public static string InstanceId { get; } = Guid.NewGuid().ToString();
+
+        public static string LogDir { get; private set; }
+
+        public CommandLineArgs AppArgs { get; private set; }
 
         private void Application_Startup(object sender, StartupEventArgs e)
         {
             try
             {
-                string searchFor = null;
-                Utils.DeleteTempFolder();
-                if (e.Args != null && e.Args.Length > 0)
-                {
-                    string searchPath = e.Args[0];
-                    if (e.Args.Length == 2)
-                        searchFor = e.Args[1];
-                    if (searchPath == "/warmUp")
-                    {
-                        this.MainWindow = new MainForm(false);
-                        this.MainWindow.Loaded += new RoutedEventHandler(MainWindow_Loaded);
-                    }
-                    else
-                    {
-                        if (searchPath.EndsWith(":\""))
-                            searchPath = searchPath.Substring(0, searchPath.Length - 1) + "\\";
-                        GrepSettings.Instance.Set<string>(GrepSettings.Key.SearchFolder, searchPath);
-                        if (searchFor != null)
-                        {
-                            GrepSettings.Instance.Set<string>(GrepSettings.Key.SearchFor, searchFor);
-                            GrepSettings.Instance.Set<SearchType>(GrepSettings.Key.TypeOfSearch, SearchType.Regex);
-                        }
-                    }
-                }
-                if (this.MainWindow == null)
-                    this.MainWindow = new MainForm();
+                LogDir = Path.Combine(Utils.GetDataFolderPath(), "logs");
+                GlobalDiagnosticsContext.Set("logDir", LogDir);
 
-                this.MainWindow.Show();
-                if (searchFor != null && this.MainWindow.DataContext != null)
-                    ((MainViewModel)this.MainWindow.DataContext).SearchCommand.Execute(null);
+                Assembly thisAssembly = Assembly.GetAssembly(typeof(App));
+                var path = Path.GetDirectoryName(thisAssembly.Location);
+                if (Environment.Is64BitProcess)
+                    SevenZip.SevenZipBase.SetLibraryPath(Path.Combine(path, @"7z64.dll"));
+                else
+                    SevenZip.SevenZipBase.SetLibraryPath(Path.Combine(path, @"7z.dll"));
+
+                AppTheme.Instance.Initialize();
+
+                AppArgs = new CommandLineArgs(Environment.CommandLine);
+
+                if (AppArgs.WarmUp)
+                {
+                    MainWindow = new MainForm(false);
+                    MainWindow.Loaded += MainWindow_Loaded;
+                }
+                else if (AppArgs.ShowHelp)
+                {
+                    MainWindow = new HelpWindow(AppArgs.GetHelpString(), AppArgs.InvalidArgument);
+                }
+                else
+                {
+                    AppArgs.ApplyArgs();
+                }
+
+                if (MainWindow == null)
+                {
+                    MainWindow = new MainForm();
+                    Utils.DeleteTempFolder();
+                }
+
+                MainWindow.Show();
+                if (AppArgs.ExecuteSearch && MainWindow.DataContext != null)
+                    ((MainViewModel)MainWindow.DataContext).SearchCommand.Execute(null);
             }
             catch (Exception ex)
             {
-                logger.Log<Exception>(LogLevel.Error, ex.Message, ex);
-                MessageBox.Show("Something broke down in the program. See event log for details.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                logger.Error(ex, "Failure in application startup");
+                MessageBox.Show("Something broke down in dnGrep. See the error log for details: " + LogDir,
+                    "dnGrep", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
         void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
-            this.MainWindow.Close();
+            MainWindow.Close();
         }
+
         private void Application_Exit(object sender, ExitEventArgs e)
         {
             try
@@ -66,14 +83,17 @@ namespace dnGREP.WPF
             }
             catch (Exception ex)
             {
-                logger.Log<Exception>(LogLevel.Error, ex.Message, ex);
-                MessageBox.Show("Something broke down in the program. See event log for details.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                logger.Error(ex, "Failure in application exit");
+                MessageBox.Show("Something broke down in dnGrep. See the error log for details: " + LogDir,
+                    "dnGrep", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
+
         private void Application_DispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e)
         {
-            logger.Log<Exception>(LogLevel.Error, e.Exception.Message, e.Exception);
-            MessageBox.Show("Something broke down in the program. See event log for details.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            logger.Error(e.Exception, "Unhandled exception caught");
+            MessageBox.Show("Something broke down in dnGrep. See the error log for details: " + LogDir,
+                    "dnGrep", MessageBoxButton.OK, MessageBoxImage.Error);;
             e.Handled = true;
         }
     }

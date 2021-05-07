@@ -5,15 +5,15 @@ using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Data;
 using System.Windows.Documents;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using dnGREP.Common;
 using dnGREP.Common.UI;
 using dnGREP.WPF.MVHelpers;
-using FileInfo = Alphaleonis.Win32.Filesystem.FileInfo;
 using Path = Alphaleonis.Win32.Filesystem.Path;
 
 namespace dnGREP.WPF
@@ -31,7 +31,7 @@ namespace dnGREP.WPF
             this.CollectionChanged += ObservableGrepSearchResults_CollectionChanged;
         }
 
-        private Dictionary<string, BitmapSource> icons = new Dictionary<string, BitmapSource>();
+        private readonly Dictionary<string, BitmapSource> icons = new Dictionary<string, BitmapSource>();
 
         /// <summary>
         /// Gets the collection of Selected tree nodes, in the order they were selected
@@ -152,7 +152,25 @@ namespace dnGREP.WPF
         public void AddRange(List<GrepSearchResult> list)
         {
             foreach (var l in list)
+            {
+                var fmtResult = new FormattedGrepResult(l, folderPath);
+                Add(fmtResult);
+
+                // moved this check out of FormattedGrepResult constructor:
+                // does not work correctly in TestPatternView, which does not lazy load
+                if (GrepSettings.Instance.Get<bool>(GrepSettings.Key.ExpandResults))
+                {
+                    fmtResult.IsExpanded = true;
+                }
+            }
+        }
+
+        public void AddRangeForTestView(List<GrepSearchResult> list)
+        {
+            foreach (var l in list)
+            {
                 Add(new FormattedGrepResult(l, folderPath));
+            }
         }
 
         public void AddRange(IEnumerable<FormattedGrepResult> items)
@@ -186,13 +204,25 @@ namespace dnGREP.WPF
             }
         }
 
+        // some settings have changed, raise property changed events to update the UI
+        public void RaiseSettingsPropertiesChanged()
+        {
+            base.OnPropertyChanged(new PropertyChangedEventArgs("CustomEditorConfigured"));
+            base.OnPropertyChanged(new PropertyChangedEventArgs("CompareApplicationConfigured"));
+
+            foreach (var item in this)
+            {
+                item.RaiseSettingsPropertiesChanged();
+            }
+        }
         public bool CustomEditorConfigured
         {
             get { return GrepSettings.Instance.IsSet(GrepSettings.Key.CustomEditor); }
-            set
-            {
-                base.OnPropertyChanged(new PropertyChangedEventArgs("CustomEditorConfigured"));
-            }
+        }
+
+        public bool CompareApplicationConfigured
+        {
+            get { return GrepSettings.Instance.IsSet(GrepSettings.Key.CompareApplication); }
         }
 
         private double resultsScale = 1.0;
@@ -210,24 +240,14 @@ namespace dnGREP.WPF
             }
         }
 
-        private double resultsMenuScale = 1.0;
-        public double ResultsMenuScale
-        {
-            get { return resultsMenuScale; }
-            set
-            {
-                if (value == resultsMenuScale)
-                    return;
-
-                resultsMenuScale = value;
-
-                base.OnPropertyChanged(new PropertyChangedEventArgs("ResultsMenuScale"));
-            }
-        }
-
         public bool HasSelection
         {
             get { return SelectedNodes.Any(); }
+        }
+
+        public bool HasSingleSelection
+        {
+            get { return SelectedNodes.Count() == 1; }
         }
 
         public bool HasMultipleSelection
@@ -248,9 +268,62 @@ namespace dnGREP.WPF
         void SelectedNodes_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
         {
             base.OnPropertyChanged(new PropertyChangedEventArgs("HasSelection"));
+            base.OnPropertyChanged(new PropertyChangedEventArgs("HasSingleSelection"));
             base.OnPropertyChanged(new PropertyChangedEventArgs("HasMultipleSelection"));
             base.OnPropertyChanged(new PropertyChangedEventArgs("HasGrepResultSelection"));
             base.OnPropertyChanged(new PropertyChangedEventArgs("HasGrepLineSelection"));
+        }
+
+        RelayCommand _compareFilesCommand;
+        public ICommand CompareFilesCommand
+        {
+            get
+            {
+                if (_compareFilesCommand == null)
+                {
+                    _compareFilesCommand = new RelayCommand(
+                        param => CompareFiles(),
+                        param => CanCompareFiles
+                        );
+                }
+                return _compareFilesCommand;
+            }
+        }
+
+        private IList<GrepSearchResult> GetSelectedFiles()
+        {
+            List<GrepSearchResult> files = new List<GrepSearchResult>();
+            foreach (var item in SelectedItems)
+            {
+                if (item is FormattedGrepResult fileNode)
+                {
+                    if (!files.Contains(fileNode.GrepResult))
+                        files.Add(fileNode.GrepResult);
+                }
+                if (item is FormattedGrepLine lineNode)
+                {
+                    if (!files.Contains(lineNode.Parent.GrepResult))
+                        files.Add(lineNode.Parent.GrepResult);
+                }
+            }
+            return files;
+        }
+
+
+        public bool CanCompareFiles
+        {
+            get
+            {
+                int count = GetSelectedFiles().Count;
+                return count == 2 || count == 3;
+            }
+        }
+
+        private void CompareFiles()
+        {
+            var files = GetSelectedFiles();
+            if (files.Count == 2 || files.Count == 3)
+                Utils.CompareFiles(files);
         }
 
         private bool isResultsTreeFocused;
@@ -303,28 +376,51 @@ namespace dnGREP.WPF
             get { return GrepResult.Matches.Count; }
         }
 
-        private FileInfo fileInfo;
-        public string Size
+        public string Style { get; private set; } = "";
+
+        private string label = string.Empty;
+        public string Label
         {
-            get
+            get { return label; }
+            set
             {
-                return string.Format("{0}", fileInfo.Length);
+                if (label == value)
+                    return;
+
+                label = value;
+                OnPropertyChanged(nameof(Label));
             }
         }
 
-        public string FileName
+        internal int MatchIdx { get; set; }
+        internal Dictionary<string, string> GroupColors { get; } = new Dictionary<string, string>();
+
+        public bool ShowFileInfoTooltips
         {
-            get { return fileInfo.Name; }
+            get { return GrepSettings.Instance.Get<bool>(GrepSettings.Key.ShowFileInfoTooltips); }
         }
 
-        public string FilePath
+        // some settings have changed, raise property changed events to update the UI
+        public void RaiseSettingsPropertiesChanged()
         {
-            get { return fileInfo.FullName; }
+            base.OnPropertyChanged(() => ShowFileInfoTooltips);
         }
 
-        public string Style { get; private set; } = "";
+        public async Task ExpandTreeNode()
+        {
+            if (!FormattedLines.IsLoaded)
+            {
+                IsLoading = true;
+                await FormattedLines.LoadAsync();
+                IsLoading = false;
+            }
+            IsExpanded = true;
+        }
 
-        public string Label { get; private set; } = "";
+        internal void CollapseTreeNode()
+        {
+            IsExpanded = false;
+        }
 
         private bool isExpanded = false;
         public bool IsExpanded
@@ -332,11 +428,14 @@ namespace dnGREP.WPF
             get { return isExpanded; }
             set
             {
+                if (isExpanded == value)
+                    return;
+
                 isExpanded = value;
                 if (value == true && !FormattedLines.IsLoaded && !FormattedLines.IsLoading)
                 {
                     IsLoading = true;
-                    FormattedLines.Load(true);
+                    Task.Run(() => FormattedLines.LoadAsync());
                 }
                 OnPropertyChanged("IsExpanded");
             }
@@ -378,20 +477,39 @@ namespace dnGREP.WPF
 
         public LazyResultsList FormattedLines { get; private set; }
 
+        private string searchFolderPath;
+
         public FormattedGrepResult(GrepSearchResult result, string folderPath)
         {
             GrepResult = result;
-            fileInfo = new FileInfo(GrepResult.FileNameReal);
 
+            searchFolderPath = folderPath;
+            bool isFileReadOnly = SetLabel();
+
+            if (isFileReadOnly)
+            {
+                GrepResult.ReadOnly = true;
+                Style = "ReadOnly";
+            }
+            if (!GrepResult.IsSuccess)
+            {
+                Style = "Error";
+            }
+
+            FormattedLines = new LazyResultsList(result, this);
+            FormattedLines.LineNumberColumnWidthChanged += FormattedLines_PropertyChanged;
+            FormattedLines.LoadFinished += FormattedLines_LoadFinished;
+        }
+
+        internal bool SetLabel()
+        {
             bool isFileReadOnly = Utils.IsReadOnly(GrepResult);
-            bool isSuccess = GrepResult.IsSuccess;
 
-            string basePath = string.IsNullOrWhiteSpace(folderPath) ? string.Empty :
-                Utils.GetBaseFolder(folderPath).TrimEnd('\\');
+            string basePath = string.IsNullOrWhiteSpace(searchFolderPath) ? string.Empty : searchFolderPath.TrimEnd('\\');
             string displayedName = Path.GetFileName(GrepResult.FileNameDisplayed);
 
             if (GrepSettings.Instance.Get<bool>(GrepSettings.Key.ShowFilePathInResults) &&
-                GrepResult.FileNameDisplayed.Contains(basePath))
+                GrepResult.FileNameDisplayed.Contains(basePath, StringComparison.CurrentCultureIgnoreCase))
             {
                 if (!string.IsNullOrWhiteSpace(basePath))
                     displayedName = GrepResult.FileNameDisplayed.Substring(basePath.Length + 1).TrimStart('\\');
@@ -418,29 +536,12 @@ namespace dnGREP.WPF
             }
             if (isFileReadOnly)
             {
-                result.ReadOnly = true;
                 displayedName = displayedName + " [read-only]";
             }
 
             Label = displayedName;
 
-            if (isFileReadOnly)
-            {
-                Style = "ReadOnly";
-            }
-            if (!isSuccess)
-            {
-                Style = "Error";
-            }
-
-            FormattedLines = new LazyResultsList(result, this);
-            FormattedLines.LineNumberColumnWidthChanged += FormattedLines_PropertyChanged;
-            FormattedLines.LoadFinished += FormattedLines_LoadFinished;
-
-            if (GrepSettings.Instance.Get<bool>(GrepSettings.Key.ExpandResults))
-            {
-                IsExpanded = true;
-            }
+            return isFileReadOnly;
         }
 
         void FormattedLines_LoadFinished(object sender, EventArgs e)
@@ -545,8 +646,13 @@ namespace dnGREP.WPF
 
         void Parent_PropertyChanged(object sender, PropertyChangedEventArgs e)
         {
-            if (e.PropertyName == "LineNumberColumnWidth")
+            if (e.PropertyName == nameof(LineNumberColumnWidth))
                 LineNumberColumnWidth = Parent.LineNumberColumnWidth;
+        }
+
+        public bool HighlightCaptureGroups
+        {
+            get { return GrepSettings.Instance.Get<bool>(GrepSettings.Key.HighlightCaptureGroups); }
         }
 
         public FormattedGrepResult Parent { get; private set; }
@@ -573,26 +679,49 @@ namespace dnGREP.WPF
                 line.Matches.CopyTo(lineMatches);
                 foreach (GrepMatch m in lineMatches)
                 {
+                    Parent.MatchIdx++;
                     try
                     {
                         string regLine = null;
                         string fmtLine = null;
-                        if (fullLine.Length < m.StartLocation + m.Length)
+                        if (m.StartLocation < fullLine.Length)
                         {
-                            regLine = fullLine.Substring(counter, fullLine.Length - counter);
+                            regLine = fullLine.Substring(counter, m.StartLocation - counter);
+                        }
+
+                        if (m.StartLocation + m.Length <= fullLine.Length)
+                        {
+                            fmtLine = fullLine.Substring(m.StartLocation, m.Length);
+                        }
+                        else if (fullLine.Length > m.StartLocation)
+                        {
+                            // match may include the non-printing newline chars at the end of the line: don't overflow the length
+                            fmtLine = fullLine.Substring(m.StartLocation, fullLine.Length - m.StartLocation);
                         }
                         else
                         {
-                            regLine = fullLine.Substring(counter, m.StartLocation - counter);
-                            fmtLine = fullLine.Substring(m.StartLocation, m.Length);
+                            // binary file?
+                            regLine = fullLine;
                         }
 
-                        Run regularRun = new Run(regLine);
-                        paragraph.Inlines.Add(regularRun);
-
+                        if (regLine != null)
+                        {
+                            Run regularRun = new Run(regLine);
+                            paragraph.Inlines.Add(regularRun);
+                        }
                         if (fmtLine != null)
                         {
-                            paragraph.Inlines.Add(new Run(fmtLine) { Background = Brushes.Yellow });
+                            if (HighlightCaptureGroups && m.Groups.Count > 0)
+                            {
+                                FormatCaptureGroups(paragraph, m, fmtLine);
+                            }
+                            else
+                            {
+                                var run = new Run(fmtLine);
+                                run.SetResourceReference(Run.ForegroundProperty, "Match.Highlight.Foreground");
+                                run.SetResourceReference(Run.BackgroundProperty, "Match.Highlight.Background");
+                                paragraph.Inlines.Add(run);
+                            }
                         }
                         else
                         {
@@ -626,7 +755,11 @@ namespace dnGREP.WPF
                 if (line.LineText.Length > MAX_LINE_LENGTH)
                 {
                     string msg = string.Format("...(+{0:n0} characters)", line.LineText.Length - MAX_LINE_LENGTH);
-                    paragraph.Inlines.Add(new Run(msg) { Background = Brushes.AliceBlue });
+
+                    var msgRun = new Run(msg);
+                    msgRun.SetResourceReference(Run.ForegroundProperty, "TreeView.Message.Highlight.Foreground");
+                    msgRun.SetResourceReference(Run.BackgroundProperty, "TreeView.Message.Highlight.Background");
+                    paragraph.Inlines.Add(msgRun);
 
                     var hiddenMatches = line.Matches.Where(m => m.StartLocation > MAX_LINE_LENGTH).Select(m => m);
                     int count = hiddenMatches.Count();
@@ -643,7 +776,10 @@ namespace dnGREP.WPF
                         {
                             paragraph.Inlines.Add(new Run("  "));
                             string fmtLine = line.LineText.Substring(m.StartLocation, m.Length);
-                            paragraph.Inlines.Add(new Run(fmtLine) { Background = Brushes.Yellow });
+                            var run = new Run(fmtLine);
+                            run.SetResourceReference(Run.ForegroundProperty, "Match.Highlight.Foreground");
+                            run.SetResourceReference(Run.BackgroundProperty, "Match.Highlight.Background");
+                            paragraph.Inlines.Add(run);
 
                             if (m.StartLocation + m.Length == line.LineText.Length)
                                 paragraph.Inlines.Add(new Run(" (at end of line)"));
@@ -659,6 +795,191 @@ namespace dnGREP.WPF
                 }
             }
             return paragraph.Inlines;
+        }
+
+        private void FormatCaptureGroups(Paragraph paragraph, GrepMatch match, string fmtLine)
+        {
+            if (paragraph == null || match == null || string.IsNullOrEmpty(fmtLine))
+                return;
+
+            GroupMap map = new GroupMap(match, fmtLine);
+            foreach (var range in map.Ranges.Where(r => r.Length > 0))
+            {
+                var run = new Run(range.RangeText);
+                if (range.Group == null)
+                {
+                    run.SetResourceReference(Run.ForegroundProperty, "Match.Highlight.Foreground");
+                    run.SetResourceReference(Run.BackgroundProperty, "Match.Highlight.Background");
+                    run.ToolTip = $"Match {Parent.MatchIdx}{Environment.NewLine}{fmtLine}";
+                    paragraph.Inlines.Add(run);
+                }
+                else
+                {
+                    if (!Parent.GroupColors.TryGetValue(range.Group.Name, out string bgColor))
+                    {
+                        int groupIdx = Parent.GroupColors.Count % 10;
+                        bgColor = $"Match.Group.{groupIdx}.Highlight.Background";
+                        Parent.GroupColors.Add(range.Group.Name, bgColor);
+                    }
+                    run.SetResourceReference(Run.ForegroundProperty, "Match.Highlight.Foreground");
+                    run.SetResourceReference(Run.BackgroundProperty, bgColor);
+                    run.ToolTip = $"Match {Parent.MatchIdx}{Environment.NewLine}Group {range.Group.Name}:   {range.Group.Value}";
+                    paragraph.Inlines.Add(run);
+                }
+            }
+        }
+
+        private class GroupMap
+        {
+            private readonly int start;
+            private readonly List<Range> ranges = new List<Range>();
+            public GroupMap(GrepMatch match, string text)
+            {
+                start = match.StartLocation;
+                MatchText = text;
+                ranges.Add(new Range(0, MatchText.Length, this, null));
+
+                foreach (var group in match.Groups.OrderByDescending(g => g.Length))
+                {
+                    Insert(group);
+                }
+                ranges.Sort();
+            }
+
+            public IEnumerable<Range> Ranges => ranges;
+
+            public string MatchText { get; }
+
+            private void Insert(GrepCaptureGroup group)
+            {
+                int startIndex = group.StartLocation - start;
+                int endIndex = startIndex + group.Length;
+
+                //gggggg
+                //xxxxxx
+                var replace = ranges.FirstOrDefault(r => r.Start == startIndex && r.End == endIndex);
+                if (replace != null)
+                {
+                    ranges.Remove(replace);
+                    ranges.Add(new Range(startIndex, endIndex, this, group));
+                }
+                else
+                {
+                    //gg
+                    //xxxxxx
+                    var head = ranges.FirstOrDefault(r => r.Start == startIndex && r.End > endIndex);
+                    if (head != null)
+                    {
+                        ranges.Remove(head);
+                        ranges.Add(new Range(startIndex, endIndex, this, group));
+                        ranges.Add(new Range(endIndex, head.End, this, head.Group));
+                    }
+                    else
+                    {
+                        //    gg
+                        //xxxxxx
+                        var tail = ranges.FirstOrDefault(r => r.Start < startIndex && r.End == endIndex);
+                        if (tail != null)
+                        {
+                            ranges.Remove(tail);
+                            ranges.Add(new Range(tail.Start, startIndex, this, tail.Group));
+                            ranges.Add(new Range(startIndex, endIndex, this, group));
+                        }
+                        else
+                        {
+                            //  gg
+                            //xxxxxx
+                            var split = ranges.FirstOrDefault(r => r.Start < startIndex && r.End > endIndex);
+                            if (split != null)
+                            {
+                                ranges.Remove(split);
+                                ranges.Add(new Range(split.Start, startIndex, this, split.Group));
+                                ranges.Add(new Range(startIndex, endIndex, this, group));
+                                ranges.Add(new Range(endIndex, split.End, this, split.Group));
+                            }
+                            else
+                            {
+                                //   gggg  
+                                //xxxxxyyyyy
+                                var spans = ranges.Where(r => (r.Start < startIndex && r.End < endIndex) ||
+                                    (r.Start > startIndex && r.End > endIndex)).OrderBy(r => r.Start).ToList();
+
+                                if (spans.Count == 2)
+                                {
+                                    ranges.Remove(spans[0]);
+                                    ranges.Remove(spans[1]);
+                                    ranges.Add(new Range(spans[0].Start, startIndex, this, spans[0].Group));
+                                    ranges.Add(new Range(startIndex, endIndex, this, group));
+                                    ranges.Add(new Range(endIndex, spans[1].End, this, spans[1].Group));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private class Range : IComparable<Range>, IComparable, IEquatable<Range>
+        {
+            private readonly GroupMap parentMap;
+            public Range(int start, int end, GroupMap parent, GrepCaptureGroup group)
+            {
+                Start = Math.Min(start, end);
+                End = Math.Max(start, end);
+                parentMap = parent;
+                Group = group;
+            }
+
+            public int Start { get; }
+            public int End { get; }
+
+            public int Length { get { return End - Start; } }
+
+            public string RangeText { get { return parentMap.MatchText.Substring(Start, Length); } }
+
+            public GrepCaptureGroup Group { get; }
+
+            public int CompareTo(object obj)
+            {
+                return CompareTo(obj as Range);
+            }
+
+            public int CompareTo(Range other)
+            {
+                if (other == null)
+                    return 1;
+                else
+                    return Start.CompareTo(other.Start); // should never be equal
+            }
+
+            public override bool Equals(object obj)
+            {
+                return Equals(obj as Range);
+            }
+
+            public bool Equals(Range other)
+            {
+                if (other == null) return false;
+
+                return Start == other.Start &&
+                    End == other.End;
+            }
+
+            public override int GetHashCode()
+            {
+                unchecked
+                {
+                    int hashCode = 13;
+                    hashCode = (hashCode * 397) ^ Start;
+                    hashCode = (hashCode * 397) ^ End;
+                    return hashCode;
+                }
+            }
+
+            public override string ToString()
+            {
+                return $"{Start} - {End}:  {RangeText}";
+            }
         }
     }
 

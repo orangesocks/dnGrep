@@ -90,18 +90,13 @@
     <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="AlphaFS, Version=2.2.0.0, Culture=neutral, PublicKeyToken=4d31a58f7d7ad5c9, processorArchitecture=MSIL">
-      <HintPath>..\packages\AlphaFS.2.2.6\lib\net452\AlphaFS.dll</HintPath>
-    </Reference>
     <Reference Include="Microsoft.CSharp" />
-    <Reference Include="Newtonsoft.Json, Version=12.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
-      <HintPath>..\packages\Newtonsoft.Json.12.0.1\lib\net45\Newtonsoft.Json.dll</HintPath>
-    </Reference>
-    <Reference Include="NLog, Version=4.0.0.0, Culture=neutral, PublicKeyToken=5120e14c03d0593c, processorArchitecture=MSIL">
-      <HintPath>..\packages\NLog.4.5.11\lib\net45\NLog.dll</HintPath>
-    </Reference>
+    <Reference Include="Microsoft.VisualBasic" />
     <Reference Include="PresentationCore" />
     <Reference Include="PresentationFramework" />
+    <Reference Include="SevenZipSharp">
+      <HintPath>..\Dependencies\SevenZipSharp.dll</HintPath>
+    </Reference>
     <Reference Include="System" />
     <Reference Include="System.Configuration" />
     <Reference Include="System.Core">
@@ -121,6 +116,7 @@
     </Reference>
     <Reference Include="System.Data" />
     <Reference Include="System.Xml" />
+    <Reference Include="WindowsBase" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="..\AssemblyInfoCommon.cs">
@@ -129,10 +125,16 @@
     <Compile Include="..\AssemblyVersionCommon.cs">
       <Link>Properties\AssemblyVersionCommon.cs</Link>
     </Compile>
+    <Compile Include="ArchiveDirectory.cs" />
     <Compile Include="BookmarkLibrary.cs" />
     <Compile Include="Enums.cs" />
     <Compile Include="FileData.cs" />
     <Compile Include="FileFilter.cs" />
+    <Compile Include="GitUtil.cs" />
+    <Compile Include="GrepCaptureGroup.cs" />
+    <Compile Include="GrepLine.cs" />
+    <Compile Include="GrepMatch.cs" />
+    <Compile Include="NativeMethods.cs" />
     <Compile Include="PathSearchText.cs" />
     <Compile Include="SafeDirectory.cs" />
     <Compile Include="GrepSearchResult.cs" />
@@ -148,39 +150,6 @@
     <Compile Include="SearchDelegates.cs" />
     <Compile Include="GrepApplicationSettings.cs" />
     <Compile Include="ReplaceDef.cs" />
-    <Compile Include="Ude.Core\Big5Prober.cs" />
-    <Compile Include="Ude.Core\BitPackage.cs" />
-    <Compile Include="Ude.Core\CharDistributionAnalyser.cs" />
-    <Compile Include="Ude.Core\CharsetProber.cs" />
-    <Compile Include="Ude.Core\Charsets.cs" />
-    <Compile Include="Ude.Core\CodingStateMachine.cs" />
-    <Compile Include="Ude.Core\EscCharsetProber.cs" />
-    <Compile Include="Ude.Core\EscSM.cs" />
-    <Compile Include="Ude.Core\EUCJPProber.cs" />
-    <Compile Include="Ude.Core\EUCKRProber.cs" />
-    <Compile Include="Ude.Core\EUCTWProber.cs" />
-    <Compile Include="Ude.Core\GB18030Prober.cs" />
-    <Compile Include="Ude.Core\HebrewProber.cs" />
-    <Compile Include="Ude.Core\JapaneseContextAnalyser.cs" />
-    <Compile Include="Ude.Core\LangBulgarianModel.cs" />
-    <Compile Include="Ude.Core\LangCyrillicModel.cs" />
-    <Compile Include="Ude.Core\LangGreekModel.cs" />
-    <Compile Include="Ude.Core\LangHebrewModel.cs" />
-    <Compile Include="Ude.Core\LangHungarianModel.cs" />
-    <Compile Include="Ude.Core\LangThaiModel.cs" />
-    <Compile Include="Ude.Core\Latin1Prober.cs" />
-    <Compile Include="Ude.Core\MBCSGroupProber.cs" />
-    <Compile Include="Ude.Core\MBCSSM.cs" />
-    <Compile Include="Ude.Core\SBCharsetProber.cs" />
-    <Compile Include="Ude.Core\SBCSGroupProber.cs" />
-    <Compile Include="Ude.Core\SequenceModel.cs" />
-    <Compile Include="Ude.Core\SJISProber.cs" />
-    <Compile Include="Ude.Core\SMModel.cs" />
-    <Compile Include="Ude.Core\UniversalDetector.cs" />
-    <Compile Include="Ude.Core\UTF8Prober.cs" />
-    <Compile Include="Ude\CharsetDetector.cs" />
-    <Compile Include="Ude\DetectionConfidence.cs" />
-    <Compile Include="Ude\ICharsetDetector.cs" />
     <Compile Include="Utils.cs" />
   </ItemGroup>
   <ItemGroup>
@@ -191,9 +160,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="dnGrep.snk" />
-    <None Include="packages.config" />
     <None Include="Resources\na-icon.gif" />
-    <None Include="Ude\ReadMe.md" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Resources\line-icon.gif" />
@@ -203,6 +170,20 @@
       <Project>{39c7bce4-7837-401e-8afa-2bcfe70c63f7}</Project>
       <Name>dnGREP.Everything</Name>
     </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="AlphaFS">
+      <Version>2.2.6</Version>
+    </PackageReference>
+    <PackageReference Include="Newtonsoft.Json">
+      <Version>12.0.3</Version>
+    </PackageReference>
+    <PackageReference Include="NLog">
+      <Version>4.7.6</Version>
+    </PackageReference>
+    <PackageReference Include="UTF.Unknown">
+      <Version>2.3.0</Version>
+    </PackageReference>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 

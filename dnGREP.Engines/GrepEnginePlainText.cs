@@ -19,6 +19,11 @@ namespace dnGREP.Engines
 
         public GrepEnginePlainText() : base() { }
 
+        public IList<string> DefaultFileExtensions
+        {
+            get { return new string[0]; }
+        }
+
         public bool IsSearchOnly
         {
             get { return false; }
@@ -26,7 +31,7 @@ namespace dnGREP.Engines
 
         public List<GrepSearchResult> Search(string file, string searchPattern, SearchType searchType, GrepSearchOption searchOptions, Encoding encoding)
         {
-            using (FileStream fileStream = File.Open(file, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan))
+            using (FileStream fileStream = File.Open(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096, FileOptions.SequentialScan))
             {
                 return Search(fileStream, file, searchPattern, searchType, searchOptions, encoding);
             }
